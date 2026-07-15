@@ -38,12 +38,13 @@ public final class PackagesViewModel: ObservableObject {
             }
             
             // 2. Override/Update with installed packages
-            for var installedPkg in installedPackages {
-                if let repoPkg = finalDict[installedPkg.id] {
+            for installedPkg in installedPackages {
+                var mutableInstalledPkg = installedPkg
+                if let repoPkg = finalDict[mutableInstalledPkg.id] {
                     // If it's in a repo, borrow its sourceURL so we know where it came from
-                    installedPkg.sourceURL = repoPkg.sourceURL
+                    mutableInstalledPkg.sourceURL = repoPkg.sourceURL
                 }
-                finalDict[installedPkg.id] = installedPkg
+                finalDict[mutableInstalledPkg.id] = mutableInstalledPkg
             }
             
             let finalPackages = Array(finalDict.values)
