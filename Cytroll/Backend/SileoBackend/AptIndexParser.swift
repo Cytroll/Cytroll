@@ -26,6 +26,13 @@ public final class AptIndexParser {
                 continue
             }
             
+            // استخراج عنوان السورس تقريبياً من اسم الملف
+            // مثال: repo.chariz.com_._Packages -> repo.chariz.com
+            var sourceURLGuess: String? = nil
+            if let firstUnderscoreIndex = file.firstIndex(of: "_") {
+                sourceURLGuess = "https://" + String(file[..<firstUnderscoreIndex])
+            }
+            
             let blocks = content.components(separatedBy: "\n\n")
             
             for block in blocks {
@@ -53,7 +60,7 @@ public final class AptIndexParser {
                 if name.isEmpty { name = id }
                 
                 if !id.isEmpty {
-                    let pkg = Package(id: id, name: name, version: version, author: author, architecture: architecture, description: description)
+                    let pkg = Package(id: id, name: name, version: version, author: author, architecture: architecture, description: description, sourceURL: sourceURLGuess)
                     repoPackages.append(pkg)
                 }
             }

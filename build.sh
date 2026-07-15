@@ -31,13 +31,18 @@ cp -r build/Build/Products/Release-iphoneos/Cytroll.app Payload/
 echo "[*] Step 4: Pseudo-signing with ldid (The TrollStore Magic)..."
 # هذه الخطوة هي التي تزرع صلاحيات التخطي داخل التطبيق وملفاته لكي يقبلها TrollStore
 
-# توقيع أداة الـ Root Helper
-if [ -f "Payload/Cytroll.app/cytrollhelper" ]; then
-    echo "    -> Signing cytrollhelper..."
-    ldid -S"Cytroll/Cytroll.entitlements" Payload/Cytroll.app/cytrollhelper
-else
-    echo "    [!] Warning: cytrollhelper not found in App Bundle. Please make sure it's added to Xcode."
-fi
+# توقيع أداة الـ Root Helper والأدوات المساعدة في مسار Binaries/
+echo "    -> Setting execution permissions and signing Binaries..."
+for tool in cytrollhelper tar ldid zstd; do
+    tool_path="Payload/Cytroll.app/Binaries/$tool"
+    if [ -f "$tool_path" ]; then
+        chmod +x "$tool_path"
+        ldid -S"Cytroll/Cytroll.entitlements" "$tool_path"
+        echo "       [+] Signed $tool"
+    else
+        echo "       [!] Warning: $tool not found in Binaries/"
+    fi
+done
 
 # توقيع التطبيق الأساسي
 echo "    -> Signing Main Application Executable..."

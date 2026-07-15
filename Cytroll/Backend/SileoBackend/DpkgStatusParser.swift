@@ -21,7 +21,15 @@ public final class DpkgStatusParser {
         let blocks = content.components(separatedBy: "\n\n")
         
         for block in blocks {
-            guard !block.isEmpty, block.contains("Status: install ok installed") else {
+            guard !block.isEmpty else { continue }
+            
+            let isInstalled = block.contains("Status: install ok installed")
+            let isHalfInstalled = block.contains("half-installed")
+            let isHalfConfigured = block.contains("half-configured")
+            let isUnpacked = block.contains("unpacked")
+            
+            // تجاهل الحزم غير المثبتة بالكامل أو المحذوفة
+            guard isInstalled || isHalfInstalled || isHalfConfigured || isUnpacked else {
                 continue
             }
             

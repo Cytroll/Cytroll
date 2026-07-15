@@ -14,17 +14,19 @@ public struct Package: Identifiable, Hashable, Codable {
     public let author: String
     public let architecture: String
     public let description: String
+    public let sourceURL: String?
     
     // The action assigned to this package in the queue
     public var action: QueueAction? = nil
     
-    public init(id: String, name: String, version: String, author: String, architecture: String, description: String, action: QueueAction? = nil) {
+    public init(id: String, name: String, version: String, author: String, architecture: String, description: String, sourceURL: String? = nil, action: QueueAction? = nil) {
         self.id = id
         self.name = name
         self.version = version
         self.author = author
         self.architecture = architecture
         self.description = description
+        self.sourceURL = sourceURL
         self.action = action
     }
     

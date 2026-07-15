@@ -8,19 +8,17 @@ public enum BootstrapVersion: String, CaseIterable, Identifiable {
     
     public var id: String { self.rawValue }
     
-    public var downloadURL: URL {
+    public var fileName: String {
         switch self {
         case .ios15_16:
-            // Placeholder URL, replace with your actual server link
-            return URL(string: "https://example.com/bootstrap-1800.tar")!
+            return "bootstrap_1800.tar.zst"
         case .ios17:
-            // Placeholder URL, replace with your actual server link
-            return URL(string: "https://example.com/bootstrap-1900.tar")!
+            return "bootstrap_1900.tar.zst"
         }
     }
 }
 
-public final class BootstrapManager: NSObject, ObservableObject, URLSessionDownloadDelegate {
+public final class BootstrapManager: NSObject, ObservableObject {
     public static let shared = BootstrapManager()
     
     @Published public private(set) var isBootstrapInstalled: Bool = false
@@ -32,16 +30,11 @@ public final class BootstrapManager: NSObject, ObservableObject, URLSessionDownl
     private let console = ConsoleManager.shared
     private var cancellables = Set<AnyCancellable>()
     
-    private var downloadSession: URLSession!
     private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
     
     private override init() {
         super.init()
         checkBootstrapStatus()
-        
-        // Initialize secure download session
-        let config = URLSessionConfiguration.default
-        downloadSession = URLSession(configuration: config, delegate: self, delegateQueue: nil)
         
         // Subscribe to console logs to update the local logs array for the UI dynamically
         console.$logs
@@ -77,197 +70,110 @@ public final class BootstrapManager: NSObject, ObservableObject, URLSessionDownl
             self.console.clear()
         }
         
-        console.log("Preparing to download Bootstrap for \(version.rawValue)...")
+        let fileName = version.fileName
+        console.log("Preparing to install Bundled Bootstrap: \(fileName)...")
         
-        // Start Background Download
-        let task = downloadSession.downloadTask(with: version.downloadURL)
-        task.resume()
-    }
-    
-    // MARK: - URLSessionDownloadDelegate
-    
-    public func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
-        guard totalBytesExpectedToWrite > 0 else { return }
-        let progressVal = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
-        
-        // Dedicate 70% of the progress bar to downloading
-        let downloadPhaseProgress = progressVal * 0.7
-        
-        DispatchQueue.main.async {
-            self.progress = downloadPhaseProgress
+        // Execute extraction in background Task
+        Task {
+            await extractBundledBootstrap(fileName: fileName)
         }
     }
     
-    public func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
-        DispatchQueue.main.async { self.progress = 0.75 }
-        console.log("Download completed. Processing securely...")
-        
-        let tempDir = FileManager.default.temporaryDirectory
-        let tarPath = tempDir.appendingPathComponent(downloadTask.originalRequest?.url?.lastPathComponent ?? "bootstrap.tar")
-        
-        do {
-            if FileManager.default.fileExists(atPath: tarPath.path) {
-                try FileManager.default.removeItem(at: tarPath)
-            }
-            try FileManager.default.moveItem(at: location, to: tarPath)
-            console.log("Archive saved to temporary storage.")
-            
-            // Execute heavy extraction in background
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                self?.extractAndCleanup(tarPath: tarPath.path)
-            }
-        } catch {
-            failBootstrap(reason: "Failed to move downloaded file: \(error.localizedDescription)")
-        }
-    }
-    
-    public func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        if let error = error {
-            failBootstrap(reason: "Network Download failed: \(error.localizedDescription)")
-        }
-    }
-    
-    private func endBackgroundImmunity() {
-        if backgroundTaskID != .invalid {
-            UIApplication.shared.endBackgroundTask(backgroundTaskID)
-            backgroundTaskID = .invalid
-        }
-    }
-    
-    // MARK: - Extraction Engine
-    
-    /// Helper to find bundled binaries
-    private func getBundledBinary(name: String) -> String? {
-        return Bundle.main.url(forAuxiliaryExecutable: name)?.path ?? Bundle.main.url(forResource: name, withExtension: nil)?.path
-    }
-    
-    private func extractAndCleanup(tarPath: String) {
-        console.log("Preparing rootless environment...")
+    private func extractBundledBootstrap(fileName: String) async {
         let fm = FileManager.default
         
-        // 1. Ensure /var/jb is completely clean before moving
-        _ = coreBridge.executeCommand(executable: "/bin/rm", arguments: ["-rf", "/var/jb"])
-        
-        DispatchQueue.main.async { self.progress = 0.80 }
-        console.log("Extracting bootstrap to secure temporary container...")
-        
-        let tempExtractPath = FileManager.default.temporaryDirectory.appendingPathComponent("bootstrap_extract").path
-        do {
-            if fm.fileExists(atPath: tempExtractPath) {
-                try fm.removeItem(atPath: tempExtractPath)
-            }
-            try fm.createDirectory(atPath: tempExtractPath, withIntermediateDirectories: true, attributes: nil)
-        } catch {
-            failBootstrap(reason: "Failed to create temp extraction dir: \(error.localizedDescription)")
+        // 1. Locate the .tar.zst file in Binaries folder
+        guard let bootstrapZstURL = Bundle.main.url(forResource: fileName, withExtension: nil, subdirectory: "Binaries") ?? Bundle.main.url(forResource: fileName, withExtension: nil) else {
+            failBootstrap(reason: "Could not find \(fileName) in Binaries folder. Please make sure it is added to the Xcode project.")
             return
         }
         
-        var finalTarPath = tarPath
+        // الحماية والأمان: التأكد من صلاحية القراءة فقط للملف المضغوط (Read-only)
+        try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: bootstrapZstURL.path)
         
-        // 2. ZSTD Decompression (if needed)
-        if tarPath.hasSuffix(".zst") {
-            guard let zstdPath = getBundledBinary(name: "zstd") else {
-                failBootstrap(reason: "zstd binary not found in App Bundle. Cannot decompress .zst archive.")
-                return
-            }
-            
-            console.log("Decompressing ZStandard archive using bundled zstd...")
-            let decompressedTarPath = tarPath.replacingOccurrences(of: ".zst", with: "")
-            
-            // Execute: zstd -d archive.tar.zst -o archive.tar
-            let zstdSuccess = coreBridge.executeCommand(executable: zstdPath, arguments: ["-d", tarPath, "-o", decompressedTarPath])
-            
-            guard zstdSuccess else {
-                failBootstrap(reason: "Failed to decompress .zst archive using bundled zstd.")
-                return
-            }
-            
-            finalTarPath = decompressedTarPath
-            try? fm.removeItem(atPath: tarPath) // Free space
+        DispatchQueue.main.async { self.progress = 0.2 }
+        
+        // 2. Ensure /var/jb is clean before installing
+        if fm.fileExists(atPath: "/var/jb") {
+            console.log("Removing existing /var/jb directory...")
+            _ = coreBridge.executeCommand(executable: "/bin/rm", arguments: ["-rf", "/var/jb"])
         }
         
-        // 3. Tar Extraction using bundled tar
-        guard let tarBinPath = getBundledBinary(name: "tar") ?? getBundledBinary(name: "gnutar") else {
-            failBootstrap(reason: "tar binary not found in App Bundle. Please bundle a static tar.")
+        DispatchQueue.main.async { self.progress = 0.3 }
+        
+        // تجهيز المسارات والأدوات
+        guard let zstdPath = getBundledTool(name: "zstd"),
+              let tarPath = getBundledTool(name: "tar") else {
+            failBootstrap(reason: "Missing zstd or tar in Binaries folder.")
             return
         }
         
-        console.log("Extracting TAR archive using bundled tar...")
-        let extractSuccess = coreBridge.executeCommand(executable: tarBinPath, arguments: ["-xf", finalTarPath, "-C", tempExtractPath])
+        let tarFileName = fileName.replacingOccurrences(of: ".zst", with: "")
+        let tempTarPath = fm.temporaryDirectory.appendingPathComponent(tarFileName).path
+        
+        // 3. Decompress ZST to TAR باستخدام zstd المدمج
+        console.log("Decompressing \(fileName) using bundled zstd...")
+        let zstdSuccess = coreBridge.executeCommand(executable: zstdPath, arguments: [
+            "-d", bootstrapZstURL.path,
+            "-o", tempTarPath,
+            "-f" // Force overwrite
+        ])
+        
+        guard zstdSuccess, fm.fileExists(atPath: tempTarPath) else {
+            failBootstrap(reason: "Failed to decompress ZST archive.")
+            return
+        }
+        
+        DispatchQueue.main.async { self.progress = 0.5 }
+        console.log("Extracting Tar archive to system root (/)....")
+        
+        // 4. Extract the TAR archive باستخدام tar المدمج
+        let extractSuccess = coreBridge.executeCommand(executable: tarPath, arguments: [
+            "-xpf", tempTarPath,
+            "-C", "/"
+        ])
+        
+        // تنظيف الذاكرة: حذف الملف الوسيط (.tar) فوراً
+        try? fm.removeItem(atPath: tempTarPath)
         
         guard extractSuccess else {
-            failBootstrap(reason: "Tar extraction failed using bundled tar.")
+            failBootstrap(reason: "Failed to extract tar archive.")
             return
         }
         
-        DispatchQueue.main.async { self.progress = 0.88 }
-        console.log("Locating 'jb' folder within payload...")
+        DispatchQueue.main.async { self.progress = 0.7 }
+        console.log("Setting correct permissions for /var/jb...")
         
-        // 4. Find the 'jb' folder dynamically
-        var sourceJbPath = ""
-        if fm.fileExists(atPath: "\(tempExtractPath)/jb") {
-            sourceJbPath = "\(tempExtractPath)/jb"
-        } else if fm.fileExists(atPath: "\(tempExtractPath)/var/jb") {
-            sourceJbPath = "\(tempExtractPath)/var/jb"
-        } else if fm.fileExists(atPath: "\(tempExtractPath)/private/var/jb") {
-            sourceJbPath = "\(tempExtractPath)/private/var/jb"
-        }
+        // 5. Set permissions using the extracted chmod
+        _ = coreBridge.executeCommand(executable: "/var/jb/usr/bin/chmod", arguments: ["-R", "755", "/var/jb"])
         
-        guard !sourceJbPath.isEmpty else {
-            failBootstrap(reason: "Could not find 'jb' directory inside the downloaded archive.")
-            return
-        }
-        
-        console.log("Injecting 'jb' folder directly into system /var...")
-        
-        // 5. Move it directly to /var/jb
-        let moveSuccess = coreBridge.executeCommand(executable: "/bin/mv", arguments: [sourceJbPath, "/var/jb"])
-        
-        guard moveSuccess else {
-            failBootstrap(reason: "Failed to inject jb folder into /var.")
-            return
-        }
-        
-        // Clean up temp extraction folder
-        try? fm.removeItem(atPath: tempExtractPath)
-        
-        DispatchQueue.main.async { self.progress = 0.92 }
-        console.log("Bootstrap injected. Pseudo-signing prep_bootstrap.sh with ldid...")
-        
-        // 6. Code Sign using bundled ldid
-        if let ldidPath = getBundledBinary(name: "ldid") {
-            let ldidSuccess = coreBridge.executeCommand(executable: ldidPath, arguments: ["-S", "/var/jb/prep_bootstrap.sh"])
-            if !ldidSuccess {
-                console.log("WARNING: ldid failed to sign prep_bootstrap.sh.")
-            }
-        } else {
-            console.log("WARNING: ldid binary not found in App Bundle. Skipping pseudo-signing.")
-        }
-        
-        // Ensure the prep script is executable
-        _ = coreBridge.executeCommand(executable: "/bin/chmod", arguments: ["755", "/var/jb/prep_bootstrap.sh"])
-        
-        DispatchQueue.main.async { self.progress = 0.95 }
-        console.log("Executing prep_bootstrap.sh with elevated root privileges...")
-        
-        // 7. Run the prep script
-        let scriptSuccess = coreBridge.executeCommand(executable: "/var/jb/usr/bin/sh", arguments: ["/var/jb/prep_bootstrap.sh"])
-        
-        if scriptSuccess {
-            console.log("prep_bootstrap.sh executed successfully!")
+        // 6. Sign prep_bootstrap.sh if it exists
+        let prepScript = "/var/jb/prep_bootstrap.sh"
+        if fm.fileExists(atPath: prepScript) {
+            console.log("Pseudo-signing prep_bootstrap.sh with bundled ldid...")
+            let ldidPath = getBundledTool(name: "ldid") ?? "/var/jb/usr/bin/ldid"
+            _ = coreBridge.executeCommand(executable: ldidPath, arguments: ["-S", prepScript])
             
-            try? fm.removeItem(atPath: finalTarPath)
-            
-            DispatchQueue.main.async {
-                self.progress = 1.0
-                self.isInstalling = false
-                self.isBootstrapInstalled = true
-                self.checkBootstrapStatus()
-                self.endBackgroundImmunity()
+            console.log("Executing prep_bootstrap.sh...")
+            let scriptSuccess = coreBridge.executeCommand(executable: "/var/jb/usr/bin/sh", arguments: [prepScript])
+            if !scriptSuccess {
+                console.log("WARNING: prep_bootstrap.sh executed with non-zero exit status.")
             }
-        } else {
-            try? fm.removeItem(atPath: finalTarPath)
-            failBootstrap(reason: "Execution of prep_bootstrap.sh failed. Check TrollStore root entitlements.")
+        }
+        
+        // 7. Run uicache if available
+        if fm.fileExists(atPath: "/var/jb/usr/bin/uicache") {
+            console.log("Running uicache to refresh app icons...")
+            _ = coreBridge.executeCommand(executable: "/var/jb/usr/bin/uicache", arguments: ["-a"])
+        }
+        
+        DispatchQueue.main.async {
+            self.progress = 1.0
+            self.console.log("Bootstrap installation completed successfully!")
+            self.isInstalling = false
+            self.isBootstrapInstalled = true
+            self.checkBootstrapStatus()
+            self.endBackgroundImmunity()
         }
     }
     
@@ -279,5 +185,29 @@ public final class BootstrapManager: NSObject, ObservableObject, URLSessionDownl
             self.isBootstrapInstalled = false
             self.endBackgroundImmunity()
         }
+    }
+    
+    private func endBackgroundImmunity() {
+        if backgroundTaskID != .invalid {
+            UIApplication.shared.endBackgroundTask(backgroundTaskID)
+            backgroundTaskID = .invalid
+        }
+    }
+    
+    private func getBundledTool(name: String) -> String? {
+        let path = Bundle.main.bundlePath + "/Binaries/\(name)"
+        if FileManager.default.fileExists(atPath: path) {
+            // إعطاء صلاحية التنفيذ (chmod +x) للأدوات التنفيذية
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
+            return path
+        }
+        return nil
+    }
+    
+    /// Auto-detects iOS version and sets up the correct bootstrap
+    public func autoSetupBootstrap() {
+        let major = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
+        let version: BootstrapVersion = (major >= 17) ? .ios17 : .ios15_16
+        setupBootstrap(version: version)
     }
 }

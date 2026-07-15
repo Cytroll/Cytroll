@@ -19,9 +19,15 @@ public final class CytrollCoreBridge {
         let process = Process()
         
         // 🚨 Root Helper Injection (Sileo/TrollStore Standard)
-        // Look for the root helper binary inside the App Bundle
-        if let helperURL = Bundle.main.url(forAuxiliaryExecutable: "cytrollhelper") ?? Bundle.main.url(forResource: "cytrollhelper", withExtension: nil) {
-            process.executableURL = helperURL
+        // Look for the root helper binary inside the App Bundle's Binaries folder
+        let helperPath = Bundle.main.bundlePath + "/Binaries/cytrollhelper"
+        
+        let fm = FileManager.default
+        if fm.fileExists(atPath: helperPath) {
+            // التأكد من إعطائها صلاحية التنفيذ (chmod +x)
+            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: helperPath)
+            
+            process.executableURL = URL(fileURLWithPath: helperPath)
             // We pass the actual target executable and its arguments to our helper
             process.arguments = [executable] + arguments
         } else {
@@ -29,6 +35,12 @@ public final class CytrollCoreBridge {
             process.executableURL = URL(fileURLWithPath: executable)
             process.arguments = arguments
         }
+        
+        // لمنع توقف الـ APT أو DPKG في انتظار تفاعل المستخدم
+        var env = ProcessInfo.processInfo.environment
+        env["DEBIAN_FRONTEND"] = "noninteractive"
+        env["APT_LISTCHANGES_FRONTEND"] = "none"
+        process.environment = env
         
         let outputPipe = Pipe()
         let errorPipe = Pipe()
