@@ -34,78 +34,62 @@ public struct HomeView: View {
     
     // MARK: - Bootstrap Gatekeeper Subview
     @State private var selectedBootstrapVersion: BootstrapVersion = BootstrapVersion.forCurrentOS()
+    @State private var markAppeared = false
+
+    /// Depends on `localArchiveRevision` so the CTA flips after download.
+    private var hasLocalArchive: Bool {
+        _ = bootstrapManager.localArchiveRevision
+        return bootstrapManager.hasLocalArchive(for: selectedBootstrapVersion)
+    }
     
     private var bootstrapGatekeeper: some View {
-        VStack(spacing: 24) {
-            Image(systemName: "shield.checkerboard")
-                .font(.system(size: 64, weight: .light))
-                .foregroundColor(themeManager.currentTheme.accent)
+        VStack(spacing: 28) {
+            // Glyph-style mark (transparent background) — same placement as
+            // the old shield SF Symbol, not a nested app-icon tile.
+            Image("CytrollMark")
+                .resizable()
+                .renderingMode(.original)
+                .scaledToFit()
+                .frame(width: 72, height: 72)
+                .scaleEffect(markAppeared ? 1 : 0.86)
+                .opacity(markAppeared ? 1 : 0)
             
             VStack(spacing: 8) {
                 Text("Welcome to Cytroll")
-                    .font(.title2.bold())
+                    .font(.system(size: 24, weight: .bold, design: .rounded))
                     .foregroundColor(themeManager.currentTheme.textPrimary)
                 
-                Text("Rootless Environment Status")
+                Text("Procursus rootless bootstrap for your device.")
                     .font(.subheadline)
                     .foregroundColor(themeManager.currentTheme.textSecondary)
+                    .multilineTextAlignment(.center)
             }
             
-            HStack(spacing: 12) {
-                Image(systemName: statusIconName)
-                    .foregroundColor(statusColor)
-                    .font(.title3)
-                
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 8, height: 8)
                 Text(statusText)
-                    .font(.headline)
+                    .font(.subheadline.weight(.semibold))
                     .foregroundColor(themeManager.currentTheme.textPrimary)
             }
-            .padding(.vertical, 10)
             
-            if bootstrapManager.isInstalling {
-                VStack(spacing: 16) {
+            if bootstrapManager.isBusy {
+                VStack(spacing: 14) {
                     ProgressView(value: bootstrapManager.progress, total: 1.0)
                         .tint(themeManager.currentTheme.accent)
-                        .scaleEffect(1.2, anchor: .center)
                     
                     Text("\(Int(bootstrapManager.progress * 100))%")
                         .font(.headline)
                         .foregroundColor(themeManager.currentTheme.accent)
                     
-                    Text(bootstrapManager.logs.last ?? "Connecting to server...")
+                    Text(bootstrapManager.logs.last ?? (bootstrapManager.isDownloading ? "Downloading…" : "Bootstrapping…"))
                         .font(.caption.monospaced())
                         .foregroundColor(themeManager.currentTheme.textSecondary)
                         .multilineTextAlignment(.center)
-                        .lineLimit(2)
+                        .lineLimit(3)
                 }
-                .padding(.top, 10)
-            } else if bootstrapManager.health == .broken {
-                // Directory exists but is missing pieces (interrupted
-                // extraction, etc.) — repair in place, never offer the
-                // destructive fresh-install path here since that would
-                // wipe out whatever is salvageable (including someone
-                // else's environment, e.g. Dopamine's).
-                VStack(spacing: 16) {
-                    Text("A rootless environment exists at \(RootlessPaths.effectivePrefix) but is missing core files (apt/dpkg or its database). Repairing re-extracts the bootstrap tree in place without deleting anything.")
-                        .font(.caption)
-                        .foregroundColor(themeManager.currentTheme.textSecondary)
-                        .multilineTextAlignment(.center)
-
-                    Button(action: {
-                        withAnimation {
-                            bootstrapManager.repairBootstrap()
-                        }
-                    }) {
-                        Text("Repair Environment")
-                            .font(.headline.bold())
-                            .foregroundColor(.white)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 16)
-                            .background(Color.orange)
-                            .cornerRadius(14)
-                            .shadow(color: Color.orange.opacity(0.3), radius: 8, x: 0, y: 4)
-                    }
-                }
+                .padding(.top, 4)
             } else {
                 VStack(spacing: 16) {
                     Picker("Select Version", selection: $selectedBootstrapVersion) {
@@ -115,33 +99,75 @@ public struct HomeView: View {
                     }
                     .pickerStyle(.segmented)
                     .padding(.horizontal, 4)
-                    
-                    Button(action: {
-                        withAnimation {
-                            bootstrapManager.setupBootstrap(version: selectedBootstrapVersion)
-                        }
-                    }) {
-                        Text("Download & Install Bootstrap")
-                            .font(.headline.bold())
-                            .foregroundColor(.white)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 16)
-                            .background(themeManager.currentTheme.accent)
-                            .cornerRadius(14)
-                            .shadow(color: themeManager.currentTheme.accent.opacity(0.3), radius: 8, x: 0, y: 4)
+
+                    if bootstrapManager.health == .broken {
+                        Text("A rootless tree exists at \(RootlessPaths.effectivePrefix) but is missing apt/dpkg. Repair re-extracts in place.")
+                            .font(.caption)
+                            .foregroundColor(themeManager.currentTheme.textSecondary)
+                            .multilineTextAlignment(.center)
                     }
+
+                    bootstrapPrimaryButton
                 }
             }
         }
-        .padding(24)
-        .glassCard(theme: themeManager.currentTheme)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 32)
+        .frame(maxWidth: .infinity)
+        .onAppear {
+            withAnimation(.spring(response: 0.55, dampingFraction: 0.78)) {
+                markAppeared = true
+            }
+        }
     }
 
-    private var statusIconName: String {
-        switch bootstrapManager.health {
-        case .healthy: return "checkmark.circle.fill"
-        case .broken: return "exclamationmark.triangle.fill"
-        case .missing: return "xmark.circle.fill"
+    @ViewBuilder
+    private var bootstrapPrimaryButton: some View {
+        if !hasLocalArchive {
+            Button(action: {
+                withAnimation {
+                    bootstrapManager.downloadBootstrapOnly(version: selectedBootstrapVersion)
+                }
+            }) {
+                Text("Download Bootstrap")
+                    .font(.headline.bold())
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 16)
+                    .background(themeManager.currentTheme.accent)
+                    .cornerRadius(14)
+            }
+            .disabled(bootstrapManager.isBusy)
+        } else if bootstrapManager.health == .broken {
+            Button(action: {
+                withAnimation {
+                    bootstrapManager.repairFromLocalArchive(version: selectedBootstrapVersion)
+                }
+            }) {
+                Text("Repair Bootstrap")
+                    .font(.headline.bold())
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 16)
+                    .background(Color.orange)
+                    .cornerRadius(14)
+            }
+            .disabled(bootstrapManager.isBusy)
+        } else {
+            Button(action: {
+                withAnimation {
+                    bootstrapManager.installFromLocalArchive(version: selectedBootstrapVersion)
+                }
+            }) {
+                Text("Bootstrap")
+                    .font(.headline.bold())
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 16)
+                    .background(themeManager.currentTheme.accent)
+                    .cornerRadius(14)
+            }
+            .disabled(bootstrapManager.isBusy)
         }
     }
 

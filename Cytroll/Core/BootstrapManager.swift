@@ -12,13 +12,19 @@ public final class BootstrapManager: NSObject, ObservableObject {
     /// missing pieces — needs repair, not a destructive reinstall".
     @Published public private(set) var health: RootlessPaths.BootstrapHealth = .missing
     @Published public private(set) var isInstalling: Bool = false
+    /// True while a download-only (no extract) job is running.
+    @Published public private(set) var isDownloading: Bool = false
     @Published public private(set) var progress: Double = 0.0
     @Published public private(set) var logs: [String] = []
+    /// Bumped whenever the on-disk cache changes so the gatekeeper CTA refreshes.
+    @Published public private(set) var localArchiveRevision: Int = 0
 
     /// Kept for existing call sites — `true` for both `.healthy` and
     /// `.broken` (a directory is present either way); use `health` directly
     /// when the distinction matters.
     public var isBootstrapInstalled: Bool { health != .missing }
+
+    public var isBusy: Bool { isInstalling || isDownloading }
 
     private let coreBridge = CytrollCoreBridge.shared
     private let console = ConsoleManager.shared
@@ -41,29 +47,161 @@ public final class BootstrapManager: NSObject, ObservableObject {
         health = RootlessPaths.bootstrapHealth
     }
 
-    /// Fresh install — only meaningful (and only destructive) when nothing
-    /// usable exists yet. Wipes `/var/jb` first since there's nothing worth
-    /// preserving.
-    public func setupBootstrap(version: BootstrapVersion) {
-        beginInstall(version: version, preserveExisting: false)
+    // MARK: - Local archive (cache + bundled)
+
+    public func hasLocalArchive(for version: BootstrapVersion) -> Bool {
+        if FileManager.default.fileExists(atPath: cachedArchiveURL(for: version).path) {
+            return true
+        }
+        return BootstrapConfig.bundledBootstrapURL(for: version) != nil
     }
 
-    /// Repairs an incomplete/corrupted environment by re-extracting the
-    /// bootstrap tree over what's there — never deletes `/var/jb` first, so
-    /// installed packages/tweaks and their config survive. `tar -xpf`
-    /// simply overwrites/fills in whatever the archive contains.
+    public func refreshLocalArchiveAvailability() {
+        localArchiveRevision += 1
+    }
+
+    /// Application Support cache for a previously downloaded bootstrap tarball.
+    public func cachedArchiveURL(for version: BootstrapVersion) -> URL {
+        Self.bootstrapCacheDirectory().appendingPathComponent(version.fileName)
+    }
+
+    private static func bootstrapCacheDirectory() -> URL {
+        let fm = FileManager.default
+        let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? fm.temporaryDirectory
+        let dir = base.appendingPathComponent("Cytroll/Bootstrap", isDirectory: true)
+        if !fm.fileExists(atPath: dir.path) {
+            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        return dir
+    }
+
+    /// Resolves a local archive without touching the network: persistent
+    /// cache first, then any copy bundled inside the app.
+    public func resolveLocalArchiveURL(for version: BootstrapVersion) -> URL? {
+        let cached = cachedArchiveURL(for: version)
+        if FileManager.default.fileExists(atPath: cached.path) {
+            return cached
+        }
+        return BootstrapConfig.bundledBootstrapURL(for: version)
+    }
+
+    // MARK: - Public actions
+
+    /// Downloads the bootstrap archive into the persistent cache only —
+    /// does not extract or touch `/var/jb`.
+    public func downloadBootstrapOnly(version: BootstrapVersion) {
+        guard !isBusy else { return }
+
+        backgroundTaskID = UIApplication.shared.beginBackgroundTask {
+            self.console.log("WARNING: iOS forced background termination!")
+            UIApplication.shared.endBackgroundTask(self.backgroundTaskID)
+        }
+
+        DispatchQueue.main.async {
+            self.isDownloading = true
+            self.progress = 0.0
+            self.console.clear()
+        }
+
+        Task {
+            await performDownloadOnly(version: version)
+        }
+    }
+
+    /// Extracts from cache/bundled archive with no network. Use for fresh
+    /// bootstrap when `health == .missing`.
+    public func installFromLocalArchive(version: BootstrapVersion) {
+        beginLocalInstall(version: version, preserveExisting: false)
+    }
+
+    /// Re-extracts over an incomplete environment from cache/bundled only.
+    public func repairFromLocalArchive(version: BootstrapVersion = BootstrapVersion.forCurrentOS()) {
+        beginLocalInstall(version: version, preserveExisting: true)
+    }
+
+    /// Fresh install — legacy entry that still prefers local then falls back
+    /// to download+extract. Prefer the split download/install APIs for UI.
+    public func setupBootstrap(version: BootstrapVersion) {
+        if hasLocalArchive(for: version) {
+            installFromLocalArchive(version: version)
+        } else {
+            beginInstallWithNetworkFallback(version: version, preserveExisting: false)
+        }
+    }
+
     public func repairBootstrap(version: BootstrapVersion = BootstrapVersion.forCurrentOS()) {
-        beginInstall(version: version, preserveExisting: true)
+        if hasLocalArchive(for: version) {
+            repairFromLocalArchive(version: version)
+        } else {
+            beginInstallWithNetworkFallback(version: version, preserveExisting: true)
+        }
     }
 
     public func autoSetupBootstrap() {
         setupBootstrap(version: BootstrapVersion.forCurrentOS())
     }
 
-    // MARK: - Installation pipeline
+    // MARK: - Download only
 
-    private func beginInstall(version: BootstrapVersion, preserveExisting: Bool) {
-        guard !isInstalling else { return }
+    private func performDownloadOnly(version: BootstrapVersion) async {
+        console.log("Downloading bootstrap (\(version.displayName))...")
+        DispatchQueue.main.async { self.progress = 0.05 }
+
+        guard let entry = BootstrapConfig.manifestEntry(for: version),
+              let remoteURL = URL(string: entry.url) else {
+            finishDownload(success: false, reason: "No download URL in bootstrap manifest for \(version.fileName).")
+            return
+        }
+
+        console.log("Fetching \(entry.url)...")
+        guard let downloaded = await downloadBootstrap(
+            from: remoteURL,
+            fileName: version.fileName,
+            expectedSHA256: entry.sha256
+        ) else {
+            finishDownload(success: false, reason: "Download failed for \(version.fileName).")
+            return
+        }
+
+        do {
+            let dest = cachedArchiveURL(for: version)
+            let fm = FileManager.default
+            if fm.fileExists(atPath: dest.path) {
+                try fm.removeItem(at: dest)
+            }
+            try fm.copyItem(at: downloaded, to: dest)
+            if downloaded.path != dest.path {
+                try? fm.removeItem(at: downloaded)
+            }
+            console.log("Bootstrap archive saved — ready to Bootstrap.")
+            DispatchQueue.main.async {
+                self.progress = 1.0
+                self.isDownloading = false
+                self.refreshLocalArchiveAvailability()
+                self.endBackgroundImmunity()
+            }
+        } catch {
+            finishDownload(success: false, reason: "Could not save archive: \(error.localizedDescription)")
+        }
+    }
+
+    private func finishDownload(success: Bool, reason: String) {
+        if !success {
+            console.log("DOWNLOAD ERROR: \(reason)")
+        }
+        DispatchQueue.main.async {
+            self.isDownloading = false
+            if !success { self.progress = 0.0 }
+            self.refreshLocalArchiveAvailability()
+            self.endBackgroundImmunity()
+        }
+    }
+
+    // MARK: - Local install / repair
+
+    private func beginLocalInstall(version: BootstrapVersion, preserveExisting: Bool) {
+        guard !isBusy else { return }
 
         backgroundTaskID = UIApplication.shared.beginBackgroundTask {
             self.console.log("WARNING: iOS forced background termination!")
@@ -77,42 +215,76 @@ public final class BootstrapManager: NSObject, ObservableObject {
         }
 
         Task {
-            await installBootstrap(version: version, preserveExisting: preserveExisting)
+            await installFromLocal(version: version, preserveExisting: preserveExisting)
         }
     }
 
-    private func installBootstrap(version: BootstrapVersion, preserveExisting: Bool) async {
+    private func installFromLocal(version: BootstrapVersion, preserveExisting: Bool) async {
         console.log(preserveExisting
-            ? "Repairing rootless environment (\(version.displayName)) in place..."
-            : "Starting Procursus rootless bootstrap (\(version.displayName))...")
+            ? "Repairing rootless environment (\(version.displayName)) from local archive..."
+            : "Bootstrapping Procursus (\(version.displayName)) from local archive...")
 
-        guard let archiveURL = await acquireBootstrapArchive(version: version) else {
-            failBootstrap(reason: "Could not obtain bootstrap archive for \(version.fileName).")
+        DispatchQueue.main.async { self.progress = 0.1 }
+
+        guard let archiveURL = resolveLocalArchiveURL(for: version) else {
+            failBootstrap(reason: "No local bootstrap archive for \(version.fileName). Download it first.")
             return
+        }
+
+        if archiveURL.path.contains("Application Support") || archiveURL.path.contains("Cytroll/Bootstrap") {
+            console.log("Using cached \(version.fileName)")
+        } else {
+            console.log("Using bundled \(version.fileName)")
         }
 
         await extractBootstrap(from: archiveURL, version: version, preserveExisting: preserveExisting)
     }
 
-    /// Remote download first, bundled fallback second.
-    private func acquireBootstrapArchive(version: BootstrapVersion) async -> URL? {
-        DispatchQueue.main.async { self.progress = 0.05 }
+    /// Legacy combined path: try local, else download into cache then extract.
+    private func beginInstallWithNetworkFallback(version: BootstrapVersion, preserveExisting: Bool) {
+        guard !isBusy else { return }
 
-        if let entry = BootstrapConfig.manifestEntry(for: version),
-           let remoteURL = URL(string: entry.url) {
-            console.log("Downloading bootstrap from \(entry.url)...")
-            if let downloaded = await downloadBootstrap(from: remoteURL, fileName: version.fileName, expectedSHA256: entry.sha256) {
-                return downloaded
+        backgroundTaskID = UIApplication.shared.beginBackgroundTask {
+            self.console.log("WARNING: iOS forced background termination!")
+            UIApplication.shared.endBackgroundTask(self.backgroundTaskID)
+        }
+
+        DispatchQueue.main.async {
+            self.isInstalling = true
+            self.progress = 0.0
+            self.console.clear()
+        }
+
+        Task {
+            if let local = resolveLocalArchiveURL(for: version) {
+                await extractBootstrap(from: local, version: version, preserveExisting: preserveExisting)
+                return
             }
-            console.log("Remote download failed — trying bundled archive...")
-        }
 
-        if let bundled = BootstrapConfig.bundledBootstrapURL(for: version) {
-            console.log("Using bundled \(version.fileName)")
-            return bundled
-        }
+            console.log(preserveExisting
+                ? "Repairing — downloading bootstrap first..."
+                : "Starting Procursus rootless bootstrap (\(version.displayName))...")
 
-        return nil
+            guard let entry = BootstrapConfig.manifestEntry(for: version),
+                  let remoteURL = URL(string: entry.url),
+                  let downloaded = await downloadBootstrap(
+                    from: remoteURL,
+                    fileName: version.fileName,
+                    expectedSHA256: entry.sha256
+                  ) else {
+                failBootstrap(reason: "Could not obtain bootstrap archive for \(version.fileName).")
+                return
+            }
+
+            // Persist for next launch.
+            let dest = cachedArchiveURL(for: version)
+            try? FileManager.default.removeItem(at: dest)
+            try? FileManager.default.copyItem(at: downloaded, to: dest)
+            DispatchQueue.main.async { self.refreshLocalArchiveAvailability() }
+
+            let archive = FileManager.default.fileExists(atPath: dest.path) ? dest : downloaded
+            await extractBootstrap(from: archive, version: version, preserveExisting: preserveExisting)
+        }
     }
 
     private func downloadBootstrap(from url: URL, fileName: String, expectedSHA256: String?) async -> URL? {
@@ -247,6 +419,7 @@ public final class BootstrapManager: NSObject, ObservableObject {
         console.log("BOOTSTRAP ERROR: \(reason)")
         DispatchQueue.main.async {
             self.isInstalling = false
+            self.isDownloading = false
             self.progress = 0.0
             self.checkBootstrapStatus()
             self.endBackgroundImmunity()
