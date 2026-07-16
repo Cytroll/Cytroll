@@ -356,9 +356,12 @@ public struct TweaksManagerView: View {
         return sideloadStore.item(withID: id)?.asTweakInfo
     }
 
-    /// Prefer the declared Cytroll dylib UTI + Apple's Mach-O dylib type,
-    /// but always include `.item` so unknown/untagged .dylib files stay
-    /// tappable in the document picker on real devices.
+    /// Prefer the declared Cytroll dylib UTI when available, but always
+    /// include `.item` so unknown/untagged .dylib files stay tappable in
+    /// the document picker on real devices.
+    ///
+    /// Note: `UTType.dynamicLibrary` is macOS-only and does not exist on
+    /// the iOS SDK — use the UTI string if we want Mach-O dylib tagging.
     private static var sideloadImportTypes: [UTType] {
         var types: [UTType] = [.item, .data]
         if let cytroll = UTType("com.cytroll.dylib") {
@@ -367,7 +370,9 @@ public struct TweaksManagerView: View {
         if let byExt = UTType(filenameExtension: "dylib", conformingTo: .data) {
             types.insert(byExt, at: 0)
         }
-        types.insert(.dynamicLibrary, at: 0)
+        if let machoDylib = UTType("com.apple.mach-o-dylib") {
+            types.insert(machoDylib, at: 0)
+        }
         return types
     }
 
