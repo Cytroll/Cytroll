@@ -160,7 +160,7 @@ static int argument_targets_system(const char *arg) {
      * is_third_party_app_bundle_path() for the exact structural rule. */
     if (is_third_party_app_bundle_path(arg)) return 0;
 
-    /* Block /var/* outside /var/jb */
+    /* Block /var subtree outside /var/jb */
     if (path_has_prefix(arg, "/var/") && !path_has_prefix(arg, "/var/jb")) return 1;
     if (path_has_prefix(arg, "/private/var/") &&
         !path_has_prefix(arg, "/private/var/jb") &&
