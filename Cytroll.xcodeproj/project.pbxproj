@@ -15,6 +15,7 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Core/RootHelper/cytrollhelper.c,
+				Core/RootHelper/insert_dylib.c,
 			);
 			target = 127343D63006A90A00540DDC /* Cytroll */;
 		};

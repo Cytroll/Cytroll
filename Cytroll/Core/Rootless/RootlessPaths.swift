@@ -60,6 +60,15 @@ public enum RootlessPaths {
     public static var mobileSubstrateDir: String { jb("Library", "MobileSubstrate", "DynamicLibraries") }
     public static var disableTweaksFlag: String { jb(".disable_tweaks") }
 
+    // MARK: - Per-app tweak injection (AppInjectionManager)
+
+    /// Cytroll's own private state directory — lives fully inside `/var/jb`,
+    /// never touches any third-party app bundle except through the narrow,
+    /// audited `AppInjectionManager` pipeline.
+    public static var cytrollStateDir: String { jb("var", "cytroll") }
+    public static var injectionBackupsDir: String { jb("var", "cytroll", "backups") }
+    public static var injectionRecordsFile: String { jb("var", "cytroll", "injections.json") }
+
     // MARK: - Bootstrap
 
     public static var prepBootstrapScript: String { jb("prep_bootstrap.sh") }
@@ -76,13 +85,29 @@ public enum RootlessPaths {
         bundledBinariesDir + "/cytrollhelper"
     }
 
+    // MARK: - Third-party app bundles (per-app tweak injection)
+
+    /// Root directory holding every installed third-party app's `.app`
+    /// bundle (each in its own randomly-named container). Apple's own
+    /// system apps (Weather, Safari, SpringBoard, ...) never live here —
+    /// they ship on the sealed, read-only system volume — so scoping
+    /// `InstalledAppScanner`/`AppInjectionManager` to this root already
+    /// excludes them by construction.
+    public static var bundleApplicationsRoot: String {
+        "/private/var/containers/Bundle/Application"
+    }
+
     // MARK: - Safety
 
     /// Paths that must never be modified by Cytroll (signed system volume).
+    /// Third-party app bundles under `bundleApplicationsRoot` are
+    /// deliberately NOT listed here: `AppInjectionManager` is the single,
+    /// narrow, opt-in, user-confirmed exception allowed to touch them —
+    /// mirrored structurally on the native side by
+    /// `is_third_party_app_bundle_path()` in `cytrollhelper.c`.
     public static let protectedSystemPrefixes = [
         "/System",
         "/private/preboot",
-        "/private/var/containers/Bundle/Application",
         "/Applications/Weather.app",
         "/Applications/MobileSafari.app"
     ]

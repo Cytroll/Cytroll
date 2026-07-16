@@ -84,6 +84,13 @@ public final class QueueManager: ObservableObject {
             // reality on next read instead of the pre-transaction snapshot.
             PackageIndexStore.shared.refresh()
 
+            // A removed/purged tweak package deletes its .dylib/.plist from
+            // disk; refreshing here lets TweakInjectionManager notice it's
+            // gone and auto-restore any app it was injected into.
+            if success {
+                TweakInjectionManager.shared.refreshTweaks()
+            }
+
             // Delay clearing the UI state so the user can see the final status
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
                 if success {

@@ -32,12 +32,15 @@ echo "    -> Compiling cytrollhelper from C source..."
 mkdir -p Payload/Cytroll.app/Binaries
 xcrun -sdk iphoneos clang -arch arm64 -o Payload/Cytroll.app/Binaries/cytrollhelper Cytroll/Core/RootHelper/cytrollhelper.c
 
+echo "    -> Compiling insert_dylib from C source (per-app tweak injection)..."
+xcrun -sdk iphoneos clang -arch arm64 -o Payload/Cytroll.app/Binaries/insert_dylib Cytroll/Core/RootHelper/insert_dylib.c
+
 echo "[*] Step 4: Pseudo-signing with ldid (The TrollStore Magic)..."
 # هذه الخطوة هي التي تزرع صلاحيات التخطي داخل التطبيق وملفاته لكي يقبلها TrollStore
 
 # توقيع أداة الـ Root Helper والأدوات المساعدة في مسار Binaries/
 echo "    -> Setting execution permissions and signing Binaries..."
-for tool in cytrollhelper tar ldid zstd; do
+for tool in cytrollhelper insert_dylib tar ldid zstd; do
     tool_path="Payload/Cytroll.app/Binaries/$tool"
     if [ -f "$tool_path" ]; then
         chmod +x "$tool_path"

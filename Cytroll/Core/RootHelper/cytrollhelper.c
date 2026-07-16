@@ -63,6 +63,39 @@ static int is_bundled_binary_path(const char *path) {
     return 0;
 }
 
+/*
+ * Per-app tweak injection targets (AppInjectionManager) live at
+ * /private/var/containers/Bundle/Application/<UUID>/<Name>.app/...
+ * This is intentionally broader than is_bundled_binary_path() above (which
+ * only ever covers OUR OWN read-only Binaries/ folder as the *executable*
+ * to run): here we allowlist *arguments* so cp/insert_dylib/ldid/chmod can
+ * operate on files strictly inside a third-party app's .app bundle
+ * (main executable, Frameworks/) for injection/backup/restore.
+ *
+ * Still structurally confined to real Bundle/Application paths that
+ * contain an actual ".app/" component — a bare
+ * "/private/var/containers/Bundle/Application/evil" with no ".app/" is
+ * still rejected. Apple's own system apps and SpringBoard never live
+ * under this path (they ship on the sealed, read-only system volume), so
+ * they are excluded by construction, not by an extra name check.
+ */
+static int is_third_party_app_bundle_path(const char *path) {
+    if (contains_path_traversal(path)) return 0;
+
+    static const char *bundle_roots[] = {
+        "/private/var/containers/Bundle/Application/",
+        "/var/containers/Bundle/Application/",
+        NULL
+    };
+
+    for (int i = 0; bundle_roots[i]; i++) {
+        if (path_has_prefix(path, bundle_roots[i]) && strstr(path, ".app/") != NULL) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int is_allowed_executable(const char *path) {
     if (!path || path[0] != '/') return 0;
     if (is_blocked_system_path(path)) return 0;
@@ -93,6 +126,11 @@ static int argument_targets_system(const char *arg) {
 
     /* Procursus bootstrap extracts var/jb/ tree via tar -C / */
     if (strcmp(arg, "/") == 0) return 0;
+
+    /* Per-app tweak injection: allow cp/insert_dylib/ldid/chmod to touch
+     * paths strictly inside a third-party app's .app bundle. See
+     * is_third_party_app_bundle_path() for the exact structural rule. */
+    if (is_third_party_app_bundle_path(arg)) return 0;
 
     /* Block /var/* outside /var/jb */
     if (path_has_prefix(arg, "/var/") && !path_has_prefix(arg, "/var/jb")) return 1;

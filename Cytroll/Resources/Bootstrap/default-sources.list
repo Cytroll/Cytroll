@@ -5,6 +5,13 @@
 
 deb https://apt.procurs.us/ {SUITE} main
 
+# ElleKit — tweak injection library/loader (provides mobilesubstrate).
+# Procursus deliberately excludes hooking platforms/injection libraries
+# from its own repo (removed ElleKit packaging upstream in 2024) to stay
+# jailbreak-agnostic, so it must be seeded from its own official repo.
+# Flat repo (no dists/ hierarchy) — verified against https://ellekit.space/Packages (2026-07).
+deb https://ellekit.space/ ./
+
 # Popular community repositories (optional — uncomment after bootstrap)
 # deb https://repo.chariz.com/ ./
 # deb https://havoc.app/ ./

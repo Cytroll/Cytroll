@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BINARIES="$ROOT/Binaries"
 HELPER_SRC="$ROOT/Cytroll/Core/RootHelper/cytrollhelper.c"
+INSERT_DYLIB_SRC="$ROOT/Cytroll/Core/RootHelper/insert_dylib.c"
 
 mkdir -p "$BINARIES"
 
@@ -39,6 +40,13 @@ done
 if [ -f "$HELPER_SRC" ]; then
     echo "[*] Compiling cytrollhelper (host preview — final build in build.sh)..."
     xcrun -sdk iphoneos clang -arch arm64 -o "$BINARIES/cytrollhelper" "$HELPER_SRC" 2>/dev/null || \
+        echo "    [!] Skip host compile (requires Xcode iphoneos SDK on macOS)"
+fi
+
+if [ -f "$INSERT_DYLIB_SRC" ]; then
+    echo "[*] Compiling insert_dylib (host preview — final build in build.sh)..."
+    echo "    (vendored from https://github.com/Tyilo/insert_dylib for per-app tweak injection)"
+    xcrun -sdk iphoneos clang -arch arm64 -o "$BINARIES/insert_dylib" "$INSERT_DYLIB_SRC" 2>/dev/null || \
         echo "    [!] Skip host compile (requires Xcode iphoneos SDK on macOS)"
 fi
 

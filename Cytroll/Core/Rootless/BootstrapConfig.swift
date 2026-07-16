@@ -86,7 +86,13 @@ public enum BootstrapConfig {
     }
 
     public static func fallbackSources(for version: BootstrapVersion) -> [String] {
-        ["deb https://apt.procurs.us/ \(version.aptSuite) main"]
+        [
+            "deb https://apt.procurs.us/ \(version.aptSuite) main",
+            // Procursus excludes injection libraries from its own repo, so
+            // ElleKit (tweak injection/mobilesubstrate provider) needs its
+            // own official source even in the hardcoded fallback list.
+            "deb https://ellekit.space/ ./"
+        ]
     }
 
     public static func bundledBootstrapURL(for version: BootstrapVersion) -> URL? {
