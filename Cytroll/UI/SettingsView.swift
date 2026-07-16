@@ -36,8 +36,10 @@ public struct SettingsView: View {
                     // MARK: Backup & Restore
                     Section(header: Text("Data Management").foregroundColor(themeManager.currentTheme.textSecondary)) {
                         Button(action: {
-                            backupDocument = BackupManager.shared.createBackup()
-                            showingExporter = true
+                            BackupManager.shared.createBackup { document in
+                                backupDocument = document
+                                showingExporter = true
+                            }
                         }) {
                             HStack {
                                 Image(systemName: "square.and.arrow.up.fill")
@@ -239,11 +241,25 @@ public struct SettingsView: View {
                     do {
                         let data = try Data(contentsOf: url)
                         let backup = try JSONDecoder().decode(CytrollBackup.self, from: data)
-                        BackupManager.shared.restoreFromBackup(backup)
-                        presentSettingsAlert(
-                            title: "Restore Queued",
-                            message: "\(backup.packageIDs.count) package(s) from the backup were added to the queue. Confirm from the floating bar to install."
-                        )
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            let summary = BackupManager.shared.restoreFromBackup(backup)
+                            DispatchQueue.main.async {
+                                if summary.queuedFromRepos == 0 {
+                                    presentSettingsAlert(
+                                        title: "Nothing Queued",
+                                        message: summary.skippedMissingSource > 0
+                                            ? "None of the \(summary.skippedMissingSource) package(s) in this backup were found in your sources. Refresh Sources and try again."
+                                            : "The backup file contained no packages."
+                                    )
+                                } else {
+                                    var message = "\(summary.queuedFromRepos) package(s) added to the queue. Confirm from the floating bar to install."
+                                    if summary.skippedMissingSource > 0 {
+                                        message += " \(summary.skippedMissingSource) skipped (missing from sources)."
+                                    }
+                                    presentSettingsAlert(title: "Restore Queued", message: message)
+                                }
+                            }
+                        }
                     } catch {
                         presentSettingsAlert(title: "Restore Failed", message: error.localizedDescription)
                     }
@@ -266,7 +282,14 @@ public struct SettingsView: View {
                         isRemoving = false
                         BootstrapManager.shared.checkBootstrapStatus()
                         PackageIndexStore.shared.refresh()
-                        JailbreakUtilities.shared.userspaceReboot()
+                        if success {
+                            JailbreakUtilities.shared.userspaceReboot()
+                        } else {
+                            presentSettingsAlert(
+                                title: "Removal Failed",
+                                message: "Could not delete \(RootlessPaths.prefix). Nothing was rebooted — check the console and try again."
+                            )
+                        }
                     }
                 }
             } message: {

@@ -60,6 +60,7 @@ public struct CategoriesView: View {
             }
         }
         .navigationTitle("Categories")
+        .onAppear { packageIndex.ensureLoaded() }
     }
 }
 

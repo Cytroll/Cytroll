@@ -45,13 +45,27 @@ public final class DiagnosticsManager: ObservableObject {
         }
     }
 
+    /// Runs both repair steps under a single `isRepairing` session so the
+    /// Live Console stays open for the whole protocol.
     public func runFullDiagnostics(completion: @escaping (Bool) -> Void) {
+        guard !isRepairing else { return }
+        isRepairing = true
         console.log("Initiating full repair protocol...")
 
-        configureDpkg { [weak self] dpkgSuccess in
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
-            self.fixBrokenPackages { aptSuccess in
-                self.console.log("Full repair finished.")
+
+            self.console.log("Starting dpkg --configure -a")
+            let dpkgSuccess = self.coreBridge.executeDpkg(arguments: ["--configure", "-a"])
+            self.console.log(dpkgSuccess ? "dpkg configured successfully." : "dpkg configure failed.")
+
+            self.console.log("Running apt --fix-broken install")
+            let aptSuccess = self.coreBridge.executeAptGet(arguments: ["--fix-broken", "install", "-y"])
+            self.console.log(aptSuccess ? "Broken packages fixed." : "Fix broken packages failed.")
+
+            self.console.log("Full repair finished.")
+            DispatchQueue.main.async {
+                self.isRepairing = false
                 completion(dpkgSuccess && aptSuccess)
             }
         }

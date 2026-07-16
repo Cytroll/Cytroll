@@ -91,7 +91,7 @@ public final class AppInjectionManager: ObservableObject {
                     case .success(let record):
                         self.console.log("Injection succeeded: \(tweak.name) -> \(app.displayName).")
                         self.recordStore.upsert(record)
-                        self.refreshAppAfterChange(bundleID: app.bundleID, displayName: app.displayName)
+                        self.refreshAppAfterChange(bundlePath: app.bundlePath, displayName: app.displayName)
                     case .failure(let error):
                         self.console.log("Injection FAILED for \(app.displayName): \(error.localizedDescription)")
                         if case .rollbackIncomplete = error {
@@ -169,7 +169,9 @@ public final class AppInjectionManager: ObservableObject {
                     self.console.log("Restored \(record.tweakName) from \(record.appDisplayName).")
                     self.recordStore.remove(id: record.id)
                     completion(.success(()))
-                    self.refreshAppAfterChange(bundleID: record.bundleID, displayName: record.appDisplayName)
+                    if let livePath = InstalledAppScanner.shared.app(withBundleID: record.bundleID)?.bundlePath {
+                        self.refreshAppAfterChange(bundlePath: livePath, displayName: record.appDisplayName)
+                    }
                 case .failure(let error):
                     self.console.log("Restore FAILED for \(record.appDisplayName): \(error.localizedDescription)")
                     if case .rollbackIncomplete = error {
@@ -220,7 +222,9 @@ public final class AppInjectionManager: ObservableObject {
                     case .success:
                         self.console.log("Restored \(record.tweakName) from \(record.appDisplayName) (its tweak was disabled or removed).")
                         self.recordStore.remove(id: record.id)
-                        self.refreshAppAfterChange(bundleID: record.bundleID, displayName: record.appDisplayName)
+                        if let livePath = InstalledAppScanner.shared.app(withBundleID: record.bundleID)?.bundlePath {
+                            self.refreshAppAfterChange(bundlePath: livePath, displayName: record.appDisplayName)
+                        }
                     case .failure(let error):
                         self.console.log("Auto-restore failed for \(record.appDisplayName): \(error.localizedDescription)")
                         if case .appNotFound = error {
@@ -490,15 +494,18 @@ public final class AppInjectionManager: ObservableObject {
 
     // MARK: - Helpers
 
-    /// Best-effort `uicache -p <bundleID>` after a successful inject/
+    /// Best-effort `uicache -p <app.path>` after a successful inject/
     /// restore so the icon/registration cache picks up the change without
-    /// requiring a manual respring. Purely a convenience — failure here
-    /// is never treated as an injection failure.
-    private func refreshAppAfterChange(bundleID: String, displayName: String) {
+    /// requiring a manual respring. Must pass the `.app` bundle path —
+    /// Procursus `uicache -p` does not accept a bundle identifier.
+    /// Purely a convenience — failure here is never treated as an
+    /// injection failure.
+    private func refreshAppAfterChange(bundlePath: String, displayName: String) {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self = self, self.fm.fileExists(atPath: RootlessPaths.uicache) else { return }
-            self.console.log("Refreshing \(displayName)'s registration (uicache)...")
-            _ = self.coreBridge.executeCommand(executable: RootlessPaths.uicache, arguments: ["-p", bundleID])
+            guard self.fm.fileExists(atPath: bundlePath) else { return }
+            self.console.log("Refreshing \(displayName)'s registration (uicache -p)...")
+            _ = self.coreBridge.executeCommand(executable: RootlessPaths.uicache, arguments: ["-p", bundlePath])
         }
     }
 

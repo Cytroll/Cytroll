@@ -214,7 +214,14 @@ public struct TweaksManagerView: View {
                         }
                         Spacer()
                         Button("Restore Original") {
-                            injectionManager.restore(record) { _ in }
+                            ConsoleManager.shared.clear()
+                            showingInjectionConsole = true
+                            injectionManager.restore(record) { result in
+                                if case .failure(let error) = result {
+                                    lastInjectionErrorMessage = error.localizedDescription
+                                    showingInjectionError = true
+                                }
+                            }
                         }
                         .font(.caption.bold())
                         .foregroundColor(.red)

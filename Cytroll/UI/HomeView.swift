@@ -165,6 +165,7 @@ public struct HomeView: View {
     @StateObject private var queueManager = QueueManager.shared
     @StateObject private var diagnostics = DiagnosticsManager.shared
     @StateObject private var packageIndex = PackageIndexStore.shared
+    @State private var showingMaintenanceConsole = false
 
     /// Smart Maintenance and a queued install/remove transaction both drive
     /// dpkg — running them at the same time risks two dpkg processes
@@ -185,7 +186,10 @@ public struct HomeView: View {
             
             Button(action: {
                 guard !isSystemBusy else { return }
-                diagnostics.configureDpkg { _ in }
+                ConsoleManager.shared.clear()
+                showingMaintenanceConsole = true
+                // Full repair: dpkg --configure -a then apt --fix-broken
+                diagnostics.runFullDiagnostics { _ in }
             }) {
                 HStack {
                     Image(systemName: "wrench.and.screwdriver.fill")
@@ -219,6 +223,13 @@ public struct HomeView: View {
             // Keep essential repos present even if the user installed an
             // older Cytroll build that only seeded Procursus (+ ElleKit).
             RepositoryManager.shared.ensureEssentialSources()
+        }
+        .fullScreenCover(isPresented: $showingMaintenanceConsole) {
+            LiveConsoleView(
+                isPresented: $showingMaintenanceConsole,
+                isRunning: diagnostics.isRepairing,
+                title: "Smart Maintenance"
+            )
         }
     }
     

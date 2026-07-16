@@ -9,6 +9,8 @@ public struct SourcesView: View {
 
     @State private var editingSource: Source?
     @State private var editedURL = ""
+    @State private var showingValidationAlert = false
+    @State private var validationMessage = ""
     
     public init() {}
     
@@ -20,7 +22,6 @@ public struct SourcesView: View {
                 List {
                     ForEach(repoManager.sources) { source in
                         HStack(spacing: 16) {
-                            // Source Icon Placeholder
                             ZStack {
                                 RoundedRectangle(cornerRadius: 8)
                                     .fill(Color.white.opacity(0.1))
@@ -95,7 +96,11 @@ public struct SourcesView: View {
                     .keyboardType(.URL)
                 Button("Add", action: {
                     let trimmed = newSourceURL.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard trimmed.count > 10, trimmed.lowercased().hasPrefix("http") else { return }
+                    guard isValidSourceURL(trimmed) else {
+                        validationMessage = "Enter a valid http(s) repository URL (e.g. https://havoc.app/)."
+                        showingValidationAlert = true
+                        return
+                    }
                     repoManager.addSource(url: trimmed)
                     newSourceURL = "https://"
                 })
@@ -112,6 +117,11 @@ public struct SourcesView: View {
                 TextField("URL", text: $editedURL)
                     .keyboardType(.URL)
                 Button("Save", action: {
+                    guard isValidSourceURL(editedURL) else {
+                        validationMessage = "Enter a valid http(s) repository URL."
+                        showingValidationAlert = true
+                        return
+                    }
                     if let source = editingSource {
                         repoManager.editSource(oldURL: source.url, newURL: editedURL)
                     }
@@ -123,6 +133,21 @@ public struct SourcesView: View {
             } message: {
                 Text("Update the APT repository URL.")
             }
+            .alert("Invalid URL", isPresented: $showingValidationAlert) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(validationMessage)
+            }
         }
+    }
+
+    private func isValidSourceURL(_ raw: String) -> Bool {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count > 10,
+              let url = URL(string: trimmed),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              url.host != nil else { return false }
+        return true
     }
 }
