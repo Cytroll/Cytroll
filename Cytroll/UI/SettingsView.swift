@@ -6,6 +6,7 @@ public struct SettingsView: View {
     @StateObject private var diagnostics = DiagnosticsManager.shared
     @StateObject private var queueManager = QueueManager.shared
     @StateObject private var pmSettings = PackageManagerSettings.shared
+    @StateObject private var careSettings = CytrollCareSettings.shared
     @State private var tweaksEnabled: Bool = JailbreakUtilities.shared.areTweaksEnabled()
 
     /// Diagnostics/removal and a queued install/remove transaction both
@@ -123,6 +124,16 @@ public struct SettingsView: View {
                         .onChange(of: tweaksEnabled) { newValue in
                             JailbreakUtilities.shared.setTweaksEnabled(newValue)
                         }
+
+                        Toggle(isOn: $careSettings.autoReinjectEnabled) {
+                            HStack {
+                                Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
+                                    .foregroundColor(themeManager.currentTheme.accent)
+                                Text("Auto Re-inject After Updates")
+                                    .foregroundColor(themeManager.currentTheme.textPrimary)
+                            }
+                        }
+                        .tint(themeManager.currentTheme.accent)
                         
                         NavigationLink(destination: TweaksManagerView()) {
                             HStack {
@@ -134,7 +145,7 @@ public struct SettingsView: View {
                         }
                         
                         if !tweaksEnabled {
-                            Text("Safe Mode active. Tweaks are disabled. Please perform a Userspace Reboot to apply changes.")
+                            Text("Global Safe Mode: Substrate/ElleKit tweaks are disabled until you reboot userspace.")
                                 .font(.caption)
                                 .foregroundColor(.orange)
                                 .padding(.vertical, 4)

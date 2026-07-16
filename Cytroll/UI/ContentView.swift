@@ -4,8 +4,10 @@ import UniformTypeIdentifiers
 public struct ContentView: View {
     @StateObject private var themeManager = ThemeManager.shared
     @StateObject private var queueManager = QueueManager.shared
+    @Environment(\.scenePhase) private var scenePhase
     
     @State private var selectedTab = 0
+    @State private var showingTerminal = false
     
     public init() {}
     
@@ -44,9 +46,15 @@ public struct ContentView: View {
         .fullScreenCover(isPresented: $showingTerminal) {
             TerminalView(showingTerminal: $showingTerminal, queueManager: queueManager, themeManager: themeManager)
         }
+        .onChange(of: scenePhase) { phase in
+            if phase == .active {
+                AutoReinjectService.shared.evaluateOnForeground()
+            }
+        }
+        .onAppear {
+            AutoReinjectService.shared.evaluateOnForeground()
+        }
     }
-    
-    @State private var showingTerminal = false
     
     // MARK: - Queue Floating Bar Subview
     private var queueFloatingBar: some View {

@@ -15,6 +15,7 @@ public enum InjectionError: Error, LocalizedError {
     case rollbackIncomplete
     case needsRestoreFirst
     case recordMissing
+    case busy
 
     public var errorDescription: String? {
         switch self {
@@ -31,6 +32,7 @@ public enum InjectionError: Error, LocalizedError {
         case .rollbackIncomplete: return "The app may be in an inconsistent state after a failed swap. Tap \"Restore Original\" for it in Injected Apps, or relaunch Cytroll to trigger automatic recovery."
         case .needsRestoreFirst: return "A previous attempt on this app didn't fully recover. Tap \"Restore Original\" for it in Injected Apps before trying again."
         case .recordMissing: return "No pristine backup found for this app/tweak."
+        case .busy: return "Another injection operation is already running."
         }
     }
 }
@@ -77,7 +79,19 @@ public final class AppInjectionManager: ObservableObject {
         progress: @escaping (InstalledAppInfo, Result<InjectionRecord, InjectionError>) -> Void,
         completion: @escaping () -> Void
     ) {
-        guard !isProcessing, !apps.isEmpty else { return }
+        guard !isProcessing else {
+            completion()
+            return
+        }
+        guard !apps.isEmpty else {
+            completion()
+            return
+        }
+        guard !shouldRefuseForForeignGate(allowCareOwner: false) else {
+            console.log("Injection deferred — system busy (\(CytrollOperationGate.shared.busyReason ?? "unknown")).")
+            completion()
+            return
+        }
         isProcessing = true
         console.log("Starting injection: \(tweak.name) -> \(apps.count) app(s)")
 
@@ -106,6 +120,93 @@ public final class AppInjectionManager: ObservableObject {
                 self.isProcessing = false
                 self.console.log("Injection batch finished. Restart the affected app(s) (uicache/respring recommended) for changes to take effect.")
                 completion()
+            }
+        }
+    }
+
+    /// Rebuilds an app to match an exact tweak set. Empty `tweaks` strips
+    /// every injection (per-app Safe Mode pause / full restore). Used by
+    /// Care features so Pause/Resume/Re-inject are one atomic rebuild each.
+    public func applyDesiredTweaks(
+        bundleID: String,
+        displayName: String,
+        tweaks: [TweakInfo],
+        allowCareOwner: Bool = false,
+        completion: @escaping (Result<Void, InjectionError>) -> Void
+    ) {
+        guard !isProcessing else {
+            completion(.failure(.busy))
+            return
+        }
+
+        var desiredByID: [String: TweakInfo] = [:]
+        for tweak in tweaks { desiredByID[tweak.id] = tweak }
+        let desired = Array(desiredByID.values)
+
+        if desired.isEmpty && recordStore.records(forBundleID: bundleID).isEmpty {
+            completion(.success(()))
+            return
+        }
+        guard !shouldRefuseForForeignGate(allowCareOwner: allowCareOwner) else {
+            completion(.failure(.busy))
+            return
+        }
+
+        isProcessing = true
+        console.log(desired.isEmpty
+            ? "Stripping all injections from \(displayName)..."
+            : "Rebuilding \(displayName) with \(desired.count) tweak(s)...")
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+
+            if !desired.isEmpty,
+               self.recordStore.records(forBundleID: bundleID).contains(where: { $0.status == .failed }) {
+                DispatchQueue.main.async {
+                    self.isProcessing = false
+                    completion(.failure(.needsRestoreFirst))
+                }
+                return
+            }
+
+            let result = self.rebuild(bundleID: bundleID, desiredTweaks: desired)
+            DispatchQueue.main.async {
+                self.isProcessing = false
+                switch result {
+                case .failure(let error):
+                    self.console.log("Rebuild FAILED for \(displayName): \(error.localizedDescription)")
+                    if case .rollbackIncomplete = error {
+                        self.markAppRecordsFailed(bundleID: bundleID)
+                    }
+                    completion(.failure(error))
+                case .success(let pristine):
+                    for record in self.recordStore.records(forBundleID: bundleID) {
+                        self.recordStore.remove(id: record.id)
+                    }
+                    if desired.isEmpty {
+                        self.backupStore.remove(bundleID: bundleID)
+                        self.deleteBackupDir(forBackupAppPath: pristine.backupAppPath)
+                        self.console.log("All injections removed from \(displayName).")
+                    } else {
+                        for tweak in desired {
+                            let record = InjectionRecord(
+                                tweakID: tweak.id,
+                                tweakName: tweak.name,
+                                bundleID: bundleID,
+                                appDisplayName: displayName,
+                                injectedAppVersion: pristine.appVersionAtBackup,
+                                dylibDestinationPath: (InstalledAppScanner.shared.app(withBundleID: bundleID)?.bundlePath ?? "")
+                                    + "/Frameworks/" + self.dylibFileName(for: tweak)
+                            )
+                            self.recordStore.upsert(record)
+                        }
+                        self.console.log("Rebuild succeeded: \(displayName) ← \(desired.count) tweak(s).")
+                        if let livePath = InstalledAppScanner.shared.app(withBundleID: bundleID)?.bundlePath {
+                            self.refreshAppAfterChange(bundlePath: livePath, displayName: displayName)
+                        }
+                    }
+                    completion(.success(()))
+                }
             }
         }
     }
@@ -154,7 +255,14 @@ public final class AppInjectionManager: ObservableObject {
     /// comes off does the app go back to its untouched pristine state and
     /// its shared backup get freed.
     public func restore(_ record: InjectionRecord, completion: @escaping (Result<Void, InjectionError>) -> Void) {
-        guard !isProcessing else { return }
+        guard !isProcessing else {
+            completion(.failure(.busy))
+            return
+        }
+        guard !shouldRefuseForForeignGate(allowCareOwner: false) else {
+            completion(.failure(.busy))
+            return
+        }
         isProcessing = true
         console.log("Restoring \(record.tweakName) from \(record.appDisplayName)...")
 
@@ -493,6 +601,25 @@ public final class AppInjectionManager: ObservableObject {
     }
 
     // MARK: - Helpers
+
+    /// Refuse new work while another pipeline owns the gate.
+    /// Care callers (Auto Re-inject / Safe Mode) pass `allowCareOwner: true`
+    /// so their nested rebuild is permitted while they hold the gate.
+    private func shouldRefuseForForeignGate(allowCareOwner: Bool) -> Bool {
+        if QueueManager.shared.isProcessing || DiagnosticsManager.shared.isRepairing {
+            return true
+        }
+        guard let owner = CytrollOperationGate.shared.currentOwner else { return false }
+        if allowCareOwner {
+            switch owner {
+            case .autoReinject, .safeMode, .injection:
+                return false
+            case .packageTransaction, .dataVault, .diagnostics:
+                return true
+            }
+        }
+        return true
+    }
 
     /// Best-effort `uicache -p <app.path>` after a successful inject/
     /// restore so the icon/registration cache picks up the change without

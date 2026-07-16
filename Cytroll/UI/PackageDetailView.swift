@@ -12,13 +12,25 @@ public struct PackageDetailView: View {
     @StateObject private var queueManager = QueueManager.shared
     @StateObject private var holdManager = PackageHoldManager.shared
     @StateObject private var packageIndex = PackageIndexStore.shared
+    @StateObject private var injectionManager = AppInjectionManager.shared
+    @StateObject private var tweakManager = TweakInjectionManager.shared
 
     @State private var showingDepiction = false
     @State private var versionsExpanded: Bool
+    @State private var injectionRequest: InjectionRequestContext?
+    @State private var isLoadingCandidates = false
+    @State private var showingInjectionConsole = false
+    @State private var lastInjectionErrorMessage: String?
+    @State private var showingInjectionError = false
 
     public init(package: Package) {
         self._package = State(initialValue: package)
         self._versionsExpanded = State(initialValue: PackageManagerSettings.shared.showAllVersions)
+    }
+
+    private var injectableTweak: TweakInfo? {
+        guard package.isInstalled else { return nil }
+        return PackageTweakResolver.resolveTweak(forPackageID: package.id)
     }
 
     /// Every other version of this package found across configured
@@ -64,6 +76,35 @@ public struct PackageDetailView: View {
             if let updated = merged.first(where: { $0.id == package.id }) {
                 package = updated
             }
+        }
+        .onAppear {
+            if package.isInstalled {
+                tweakManager.refreshTweaks()
+            }
+        }
+        .sheet(item: $injectionRequest) { request in
+            InjectionTargetPickerSheet(
+                tweak: request.tweak,
+                apps: request.apps,
+                headerNote: request.headerNote,
+                isLoading: isLoadingCandidates,
+                onConfirm: { apps in
+                    injectionRequest = nil
+                    startPackageInjection(tweak: request.tweak, apps: apps)
+                }
+            )
+        }
+        .fullScreenCover(isPresented: $showingInjectionConsole) {
+            LiveConsoleView(
+                isPresented: $showingInjectionConsole,
+                isRunning: injectionManager.isProcessing,
+                title: "Tweak Injection"
+            )
+        }
+        .alert("Injection Failed", isPresented: $showingInjectionError) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(lastInjectionErrorMessage ?? "Unknown error.")
         }
     }
 
@@ -120,33 +161,91 @@ public struct PackageDetailView: View {
     // MARK: - Actions
 
     private var actionButtons: some View {
-        HStack(spacing: 12) {
-            if !package.isInstalled {
-                actionButton("Get", systemImage: "arrow.down.circle.fill", filled: true) {
-                    queueManager.addOrUpdate(package: package, action: .install)
+        VStack(spacing: 10) {
+            HStack(spacing: 12) {
+                if !package.isInstalled {
+                    actionButton("Get", systemImage: "arrow.down.circle.fill", filled: true) {
+                        queueManager.addOrUpdate(package: package, action: .install)
+                    }
+                } else {
+                    actionButton("Reinstall", systemImage: "arrow.triangle.2.circlepath", filled: false) {
+                        queueManager.addOrUpdate(package: package, action: .reinstall)
+                    }
+                    actionButton("Remove", systemImage: "trash", filled: false, destructive: true) {
+                        queueManager.addOrUpdate(package: package, action: .remove)
+                    }
                 }
-            } else {
-                actionButton("Reinstall", systemImage: "arrow.triangle.2.circlepath", filled: false) {
-                    queueManager.addOrUpdate(package: package, action: .reinstall)
-                }
-                actionButton("Remove", systemImage: "trash", filled: false, destructive: true) {
-                    queueManager.addOrUpdate(package: package, action: .remove)
+
+                if package.isInstalled {
+                    Spacer()
+                    Button(action: toggleHold) {
+                        Label(isHeld ? "Held" : "Hold", systemImage: isHeld ? "lock.fill" : "lock.open")
+                            .font(.caption.bold())
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background((isHeld ? Color.orange : themeManager.currentTheme.accent).opacity(0.15))
+                            .foregroundColor(isHeld ? .orange : themeManager.currentTheme.accent)
+                            .cornerRadius(10)
+                    }
                 }
             }
 
-            if package.isInstalled {
-                Spacer()
-                Button(action: toggleHold) {
-                    Label(isHeld ? "Held" : "Hold", systemImage: isHeld ? "lock.fill" : "lock.open")
-                        .font(.caption.bold())
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background((isHeld ? Color.orange : themeManager.currentTheme.accent).opacity(0.15))
-                        .foregroundColor(isHeld ? .orange : themeManager.currentTheme.accent)
-                        .cornerRadius(10)
+            if let tweak = injectableTweak {
+                Button(action: { presentInjectionSheet(for: tweak) }) {
+                    Label("Inject Into Apps…", systemImage: "syringe.fill")
+                        .font(.subheadline.bold())
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .background(themeManager.currentTheme.accent.opacity(0.15))
+                        .foregroundColor(themeManager.currentTheme.accent)
+                        .cornerRadius(12)
                 }
+                .disabled(injectionManager.isProcessing || !tweak.isEnabled)
             }
         }
+    }
+
+    private func presentInjectionSheet(for tweak: TweakInfo) {
+        isLoadingCandidates = true
+        let usesFullList = tweak.filterBundleIDs.isEmpty
+        injectionRequest = InjectionRequestContext(
+            tweak: tweak,
+            apps: [],
+            headerNote: usesFullList ? "No Filter declared — pick any installed app." : "Apps matching \(tweak.name)'s Filter."
+        )
+        if usesFullList {
+            InstalledAppScanner.shared.scanInstalledApps { apps in
+                injectionRequest?.apps = apps
+                isLoadingCandidates = false
+            }
+        } else {
+            tweakManager.candidateApps(for: tweak) { apps in
+                injectionRequest?.apps = apps
+                isLoadingCandidates = false
+            }
+        }
+    }
+
+    private func startPackageInjection(tweak: TweakInfo, apps: [InstalledAppInfo]) {
+        guard !apps.isEmpty else { return }
+        ConsoleManager.shared.clear()
+        showingInjectionConsole = true
+        var failures: [String] = []
+        injectionManager.injectBatch(
+            tweak: tweak,
+            into: apps,
+            progress: { app, result in
+                if case .failure(let error) = result {
+                    failures.append("\(app.displayName): \(error.localizedDescription)")
+                }
+            },
+            completion: {
+                if !failures.isEmpty {
+                    lastInjectionErrorMessage = failures.joined(separator: "\n\n")
+                    showingInjectionError = true
+                }
+            }
+        )
     }
 
     private func actionButton(_ title: String, systemImage: String, filled: Bool, destructive: Bool = false, action: @escaping () -> Void) -> some View {

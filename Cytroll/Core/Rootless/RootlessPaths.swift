@@ -79,6 +79,11 @@ public enum RootlessPaths {
     /// Persisted real Home tab activity log — see `ActivityLogManager`.
     public static var activityLogFile: String { jb("var", "cytroll", "activity.json") }
 
+    /// Per-app Safe Mode state — see `AppSafeModeManager`.
+    public static var appSafeModeFile: String { jb("var", "cytroll", "app_safe_mode.json") }
+    /// App data vault root — see `AppDataVault`.
+    public static var appDataVaultDir: String { jb("var", "cytroll", "data_vault") }
+
     // MARK: - Bootstrap
 
     public static var prepBootstrapScript: String { jb("prep_bootstrap.sh") }

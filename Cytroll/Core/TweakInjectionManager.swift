@@ -134,7 +134,7 @@ public final class TweakInjectionManager: ObservableObject {
     /// tweak's companion `.plist`. Missing file / missing keys just yields
     /// an empty list (handled as "no match" by callers, never "matches
     /// everything").
-    private static func readFilterBundleIDs(plistPath: String) -> [String] {
+    public static func readFilterBundleIDs(plistPath: String) -> [String] {
         guard let data = FileManager.default.contents(atPath: plistPath),
               let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any],
               let filter = plist["Filter"] as? [String: Any],

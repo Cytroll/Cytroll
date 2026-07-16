@@ -7,6 +7,10 @@ public struct TweaksManagerView: View {
     @StateObject private var recordStore = InjectionRecordStore.shared
     @StateObject private var sideloadStore = SideloadedDylibStore.shared
     @StateObject private var themeManager = ThemeManager.shared
+    @StateObject private var careSettings = CytrollCareSettings.shared
+    @StateObject private var autoReinject = AutoReinjectService.shared
+    @StateObject private var safeMode = AppSafeModeManager.shared
+    @StateObject private var dataVault = AppDataVault.shared
 
     @State private var injectionRequest: InjectionRequestContext?
     @State private var isLoadingCandidates = false
@@ -15,17 +19,30 @@ public struct TweaksManagerView: View {
     @State private var showingInjectionConsole = false
     @State private var lastInjectionErrorMessage: String?
     @State private var showingInjectionError = false
+    @State private var vaultConfirmBundleID: String?
+    @State private var showingVaultRestoreConfirm = false
 
     public init() {}
+
+    private var injectedAppGroups: [(bundleID: String, displayName: String, records: [InjectionRecord])] {
+        Dictionary(grouping: recordStore.records, by: \.bundleID)
+            .map { (bundleID: $0.key, displayName: $0.value.first?.appDisplayName ?? $0.key, records: $0.value) }
+            .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+    }
+
+    private var pausedOnlyApps: [AppSafeModeEntry] {
+        safeMode.entries.filter { $0.isPaused && recordStore.records(forBundleID: $0.bundleID).isEmpty }
+    }
 
     public var body: some View {
         ZStack {
             themeManager.backgroundGradient().ignoresSafeArea()
 
             List {
+                careSection
                 tweaksSection
                 sideloadedSection
-                if !recordStore.records.isEmpty {
+                if !injectedAppGroups.isEmpty || !pausedOnlyApps.isEmpty {
                     injectedAppsSection
                 }
                 storageSection
@@ -40,6 +57,7 @@ public struct TweaksManagerView: View {
             tweakManager.refreshTweaks()
             recordStore.refreshNeedsReapplyFlags()
             injectionManager.recoverStrayTempDirectories()
+            dataVault.reload()
         }
         .sheet(item: $injectionRequest) { request in
             InjectionTargetPickerSheet(
@@ -56,26 +74,73 @@ public struct TweaksManagerView: View {
         .fullScreenCover(isPresented: $showingInjectionConsole) {
             LiveConsoleView(
                 isPresented: $showingInjectionConsole,
-                isRunning: injectionManager.isProcessing,
+                isRunning: injectionManager.isProcessing || autoReinject.isRunning || safeMode.isProcessing || dataVault.isProcessing,
                 title: "Tweak Injection"
             )
         }
         .fileImporter(
             isPresented: $showingSideloadImporter,
-            // iOS rarely tags .dylib files with a matching UTType, so a
-            // narrow filter (filenameExtension: "dylib") greys them out
-            // in the Files picker. Allow any item, then enforce .dylib
-            // in handleSideloadPicked.
             allowedContentTypes: Self.sideloadImportTypes,
             allowsMultipleSelection: false
         ) { result in
             handleSideloadPicked(result)
         }
-        .alert("Injection Failed", isPresented: $showingInjectionError) {
+        .alert("Operation Failed", isPresented: $showingInjectionError) {
             Button("OK", role: .cancel) {}
         } message: {
             Text(lastInjectionErrorMessage ?? "Unknown error.")
         }
+        .alert("Restore App Data?", isPresented: $showingVaultRestoreConfirm) {
+            Button("Cancel", role: .cancel) { vaultConfirmBundleID = nil }
+            Button("Restore", role: .destructive) {
+                if let id = vaultConfirmBundleID {
+                    restoreLatestVault(bundleID: id)
+                }
+                vaultConfirmBundleID = nil
+            }
+        } message: {
+            Text("Overwrites Documents and Preferences from the latest vault snapshot. The app will be terminated first.")
+        }
+    }
+
+    // MARK: - Care
+
+    private var careSection: some View {
+        Section(
+            header: Text("Care").foregroundColor(themeManager.currentTheme.textSecondary),
+            footer: Text("Auto re-inject rebuilds injected apps after they update. Per-app Safe Mode and Data Vault are on each app below.")
+        ) {
+            Toggle(isOn: $careSettings.autoReinjectEnabled) {
+                Label("Auto Re-inject After Updates", systemImage: "arrow.triangle.2.circlepath.circle.fill")
+            }
+            .tint(themeManager.currentTheme.accent)
+            .foregroundColor(themeManager.currentTheme.textPrimary)
+
+            if autoReinject.pendingAppCount > 0 {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("\(autoReinject.pendingAppCount) app(s) need re-inject")
+                            .font(.subheadline.bold())
+                            .foregroundColor(.orange)
+                        if let summary = autoReinject.lastSummary {
+                            Text(summary)
+                                .font(.caption2)
+                                .foregroundColor(themeManager.currentTheme.textSecondary)
+                        }
+                    }
+                    Spacer()
+                    Button("Fix All") {
+                        ConsoleManager.shared.clear()
+                        showingInjectionConsole = true
+                        autoReinject.reapplyAllPending(triggeredByUser: true)
+                    }
+                    .font(.caption.bold())
+                    .foregroundColor(themeManager.currentTheme.accent)
+                    .disabled(autoReinject.isRunning || injectionManager.isProcessing)
+                }
+            }
+        }
+        .listRowBackground(themeManager.currentTheme.cardBackground.opacity(0.6))
     }
 
     // MARK: - Sections
@@ -123,7 +188,7 @@ public struct TweaksManagerView: View {
                     .disabled(injectionManager.isProcessing || !tweak.isEnabled)
 
                     if tweak.filterBundleIDs.isEmpty {
-                        Text("No app-injection Filter found in this tweak's plist — you'll pick from every installed app instead.")
+                        Text("No Filter in this tweak's plist — you'll pick from every installed app.")
                             .font(.caption2)
                             .foregroundColor(themeManager.currentTheme.textSecondary)
                     }
@@ -137,7 +202,7 @@ public struct TweaksManagerView: View {
     private var sideloadedSection: some View {
         Section(
             header: Text("Sideloaded Dylibs").foregroundColor(themeManager.currentTheme.textSecondary),
-            footer: Text("Pick any .dylib from Files (Filza, On My iPhone, iCloud, etc.). Only .dylib is accepted. You always pick its target app manually.")
+            footer: Text("Pick any .dylib from Files. Only .dylib is accepted.")
         ) {
             ForEach(sideloadStore.items) { item in
                 VStack(alignment: .leading, spacing: 8) {
@@ -182,61 +247,135 @@ public struct TweaksManagerView: View {
 
     private var injectedAppsSection: some View {
         Section(header: Text("Injected Apps").foregroundColor(themeManager.currentTheme.textSecondary)) {
-            ForEach(recordStore.records) { record in
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(record.appDisplayName)
-                                .font(.subheadline.bold())
-                                .foregroundColor(themeManager.currentTheme.textPrimary)
-                            Text("Tweak: \(record.tweakName)")
-                                .font(.caption2)
-                                .foregroundColor(themeManager.currentTheme.textSecondary)
-                        }
-                        Spacer()
-                        statusBadge(for: record.status)
-                    }
-
-                    HStack {
-                        // `.failed` means the atomic swap's own automatic
-                        // recovery didn't fully complete — force "Restore
-                        // Original" as the only next step rather than
-                        // offering a re-inject that would just be
-                        // rejected (and could otherwise stack a fresh
-                        // rebuild on top of an unclear state).
-                        if record.status == .needsReapply {
-                            Button("Re-inject") {
-                                reapply(record: record)
-                            }
-                            .font(.caption.bold())
-                            .foregroundColor(themeManager.currentTheme.accent)
-                            .disabled(injectionManager.isProcessing)
-                        }
-                        Spacer()
-                        Button("Restore Original") {
-                            ConsoleManager.shared.clear()
-                            showingInjectionConsole = true
-                            injectionManager.restore(record) { result in
-                                if case .failure(let error) = result {
-                                    lastInjectionErrorMessage = error.localizedDescription
-                                    showingInjectionError = true
-                                }
-                            }
-                        }
-                        .font(.caption.bold())
-                        .foregroundColor(.red)
-                        .disabled(injectionManager.isProcessing)
-                    }
-                    if record.status == .failed {
-                        Text("A previous attempt didn't fully recover. Restore this app before trying again.")
-                            .font(.caption2)
-                            .foregroundColor(.red)
-                    }
-                }
-                .padding(.vertical, 4)
-                .listRowBackground(themeManager.currentTheme.cardBackground.opacity(0.6))
+            ForEach(injectedAppGroups, id: \.bundleID) { group in
+                injectedAppRow(bundleID: group.bundleID, displayName: group.displayName, records: group.records)
+            }
+            ForEach(pausedOnlyApps) { entry in
+                pausedAppRow(entry)
             }
         }
+    }
+
+    private func injectedAppRow(bundleID: String, displayName: String, records: [InjectionRecord]) -> some View {
+        let paused = safeMode.isPaused(bundleID: bundleID)
+        let needsReapply = records.contains { $0.status == .needsReapply }
+        let hasFailed = records.contains { $0.status == .failed }
+        let vaultCount = dataVault.backups(for: bundleID).count
+
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(displayName)
+                        .font(.subheadline.bold())
+                        .foregroundColor(themeManager.currentTheme.textPrimary)
+                    Text(records.map(\.tweakName).joined(separator: ", "))
+                        .font(.caption2)
+                        .foregroundColor(themeManager.currentTheme.textSecondary)
+                        .lineLimit(2)
+                }
+                Spacer()
+                if paused {
+                    statusBadge(text: "Safe Mode", color: .orange)
+                } else if hasFailed {
+                    statusBadge(text: "Failed", color: .red)
+                } else if needsReapply {
+                    statusBadge(text: "Needs Reapply", color: .orange)
+                } else {
+                    statusBadge(text: "Active", color: .green)
+                }
+            }
+
+            HStack(spacing: 12) {
+                if needsReapply && !paused {
+                    Button("Re-inject") {
+                        reapplyApp(bundleID: bundleID, records: records)
+                    }
+                    .font(.caption.bold())
+                    .foregroundColor(themeManager.currentTheme.accent)
+                    .disabled(busy)
+                }
+
+                if paused {
+                    Button("Resume Tweaks") {
+                        runSafeMode { safeMode.resume(bundleID: bundleID, completion: $0) }
+                    }
+                    .font(.caption.bold())
+                    .foregroundColor(themeManager.currentTheme.accent)
+                    .disabled(busy)
+                } else if !hasFailed {
+                    Button("Pause Tweaks") {
+                        runSafeMode { safeMode.pause(bundleID: bundleID, completion: $0) }
+                    }
+                    .font(.caption.bold())
+                    .foregroundColor(.orange)
+                    .disabled(busy)
+                }
+
+                Spacer()
+
+                Button("Restore Original") {
+                    restoreAll(records: records)
+                }
+                .font(.caption.bold())
+                .foregroundColor(.red)
+                .disabled(busy)
+            }
+
+            HStack(spacing: 12) {
+                Button("Backup Data") {
+                    runVaultBackup(bundleID: bundleID, displayName: displayName)
+                }
+                .font(.caption.bold())
+                .foregroundColor(themeManager.currentTheme.accent)
+                .disabled(busy)
+
+                if vaultCount > 0 {
+                    Button("Restore Data (\(vaultCount))") {
+                        vaultConfirmBundleID = bundleID
+                        showingVaultRestoreConfirm = true
+                    }
+                    .font(.caption.bold())
+                    .foregroundColor(themeManager.currentTheme.accent)
+                    .disabled(busy)
+                }
+            }
+
+            if hasFailed {
+                Text("Previous rebuild didn't fully recover. Restore Original before injecting again.")
+                    .font(.caption2)
+                    .foregroundColor(.red)
+            }
+        }
+        .padding(.vertical, 4)
+        .listRowBackground(themeManager.currentTheme.cardBackground.opacity(0.6))
+    }
+
+    private func pausedAppRow(_ entry: AppSafeModeEntry) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(entry.appDisplayName)
+                    .font(.subheadline.bold())
+                    .foregroundColor(themeManager.currentTheme.textPrimary)
+                Spacer()
+                statusBadge(text: "Safe Mode", color: .orange)
+            }
+            Text("\(entry.pausedTweakIDs.count) tweak(s) paused")
+                .font(.caption2)
+                .foregroundColor(themeManager.currentTheme.textSecondary)
+
+            Button("Resume Tweaks") {
+                runSafeMode { safeMode.resume(bundleID: entry.bundleID, completion: $0) }
+            }
+            .font(.caption.bold())
+            .foregroundColor(themeManager.currentTheme.accent)
+            .disabled(busy)
+        }
+        .padding(.vertical, 4)
+        .listRowBackground(themeManager.currentTheme.cardBackground.opacity(0.6))
+    }
+
+    private var busy: Bool {
+        injectionManager.isProcessing || autoReinject.isRunning || safeMode.isProcessing || dataVault.isProcessing
     }
 
     private var storageSection: some View {
@@ -254,22 +393,15 @@ public struct TweaksManagerView: View {
 
     private var perAppInjectionDisclaimer: some View {
         Section {
-            Text("Per-app injection only works on third-party apps, breaks silently after that app updates (look for \"Needs Reapply\" above), and needs the app restarted to take effect. It never touches Apple's own apps or SpringBoard.")
+            Text("Per-app injection works on third-party apps only. After an App Store update, status becomes Needs Reapply until Care rebuilds the app. Restart the target app for changes to load.")
                 .font(.caption2)
                 .foregroundColor(themeManager.currentTheme.textSecondary)
         }
         .listRowBackground(Color.clear)
     }
 
-    private func statusBadge(for status: InjectionStatus) -> some View {
-        let (text, color): (String, Color) = {
-            switch status {
-            case .active: return ("Active", .green)
-            case .needsReapply: return ("Needs Reapply", .orange)
-            case .failed: return ("Failed", .red)
-            }
-        }()
-        return Text(text)
+    private func statusBadge(text: String, color: Color) -> some View {
+        Text(text)
             .font(.caption2.bold())
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
@@ -280,11 +412,6 @@ public struct TweaksManagerView: View {
 
     // MARK: - Actions
 
-    /// Tweaks that ship a `Filter -> Bundles` plist only ever offer those
-    /// explicitly-declared apps; everything else (no filter, or a
-    /// sideloaded dylib which never has one) falls back to the full
-    /// installed-apps list, same as real TrollFools' manual target
-    /// picker.
     private func presentInjectionSheet(for tweak: TweakInfo) {
         isLoadingCandidates = true
         let usesFullList = tweak.filterBundleIDs.isEmpty
@@ -330,21 +457,73 @@ public struct TweaksManagerView: View {
         )
     }
 
-    private func reapply(record: InjectionRecord) {
-        guard let tweak = resolveTweakInfo(id: record.tweakID) else {
-            lastInjectionErrorMessage = "This tweak is no longer installed."
+    private func reapplyApp(bundleID: String, records: [InjectionRecord]) {
+        let tweaks = records.compactMap { resolveTweakInfo(id: $0.tweakID) }
+        guard !tweaks.isEmpty else {
+            lastInjectionErrorMessage = "Tweaks for this app are no longer installed."
             showingInjectionError = true
             return
         }
-        DispatchQueue.global(qos: .userInitiated).async {
-            let app = InstalledAppScanner.shared.app(withBundleID: record.bundleID)
-            DispatchQueue.main.async {
-                guard let app = app else {
-                    lastInjectionErrorMessage = "This app is no longer installed."
-                    showingInjectionError = true
-                    return
-                }
-                startInjection(tweak: tweak, apps: [app])
+        ConsoleManager.shared.clear()
+        showingInjectionConsole = true
+        injectionManager.applyDesiredTweaks(
+            bundleID: bundleID,
+            displayName: records.first?.appDisplayName ?? bundleID,
+            tweaks: tweaks
+        ) { result in
+            if case .failure(let error) = result {
+                lastInjectionErrorMessage = error.localizedDescription
+                showingInjectionError = true
+            }
+        }
+    }
+
+    private func restoreAll(records: [InjectionRecord]) {
+        guard let first = records.first else { return }
+        ConsoleManager.shared.clear()
+        showingInjectionConsole = true
+        injectionManager.applyDesiredTweaks(
+            bundleID: first.bundleID,
+            displayName: first.appDisplayName,
+            tweaks: []
+        ) { result in
+            if case .failure(let error) = result {
+                lastInjectionErrorMessage = error.localizedDescription
+                showingInjectionError = true
+            }
+        }
+    }
+
+    private func runSafeMode(_ work: (@escaping (Result<Void, Error>) -> Void) -> Void) {
+        ConsoleManager.shared.clear()
+        showingInjectionConsole = true
+        work { result in
+            if case .failure(let error) = result {
+                lastInjectionErrorMessage = error.localizedDescription
+                showingInjectionError = true
+            }
+        }
+    }
+
+    private func runVaultBackup(bundleID: String, displayName: String) {
+        ConsoleManager.shared.clear()
+        showingInjectionConsole = true
+        dataVault.backup(bundleID: bundleID, displayName: displayName) { result in
+            if case .failure(let error) = result {
+                lastInjectionErrorMessage = error.localizedDescription
+                showingInjectionError = true
+            }
+        }
+    }
+
+    private func restoreLatestVault(bundleID: String) {
+        guard let latest = dataVault.backups(for: bundleID).first else { return }
+        ConsoleManager.shared.clear()
+        showingInjectionConsole = true
+        dataVault.restore(latest) { result in
+            if case .failure(let error) = result {
+                lastInjectionErrorMessage = error.localizedDescription
+                showingInjectionError = true
             }
         }
     }
@@ -356,12 +535,6 @@ public struct TweaksManagerView: View {
         return sideloadStore.item(withID: id)?.asTweakInfo
     }
 
-    /// Prefer the declared Cytroll dylib UTI when available, but always
-    /// include `.item` so unknown/untagged .dylib files stay tappable in
-    /// the document picker on real devices.
-    ///
-    /// Note: `UTType.dynamicLibrary` is macOS-only and does not exist on
-    /// the iOS SDK — use the UTI string if we want Mach-O dylib tagging.
     private static var sideloadImportTypes: [UTType] {
         var types: [UTType] = [.item, .data]
         if let cytroll = UTType("com.cytroll.dylib") {
@@ -398,140 +571,6 @@ public struct TweaksManagerView: View {
                     }
                 }
             }
-        }
-    }
-}
-
-/// Identity is the tweak's ID (stable), not a fresh UUID per update — the
-/// sheet is presented immediately with an empty `apps` list while
-/// scanning runs in the background, then updated in place once results
-/// arrive; a fresh identity on that second update would make SwiftUI
-/// treat it as a brand new sheet and flicker.
-private struct InjectionRequestContext: Identifiable {
-    var id: String { tweak.id }
-    let tweak: TweakInfo
-    var apps: [InstalledAppInfo]
-    var headerNote: String
-}
-
-/// Sheet listing candidate apps for a tweak/dylib — either the ones it
-/// explicitly declares support for (`Filter -> Bundles`) or, failing
-/// that, every installed app. Supports selecting multiple apps at once
-/// (batch injection) with one shared confirmation before anything is
-/// touched.
-private struct InjectionTargetPickerSheet: View {
-    let tweak: TweakInfo
-    let apps: [InstalledAppInfo]
-    let headerNote: String
-    let isLoading: Bool
-    let onConfirm: ([InstalledAppInfo]) -> Void
-
-    @StateObject private var themeManager = ThemeManager.shared
-    @Environment(\.dismiss) private var dismiss
-    @State private var selectedBundleIDs: Set<String> = []
-    @State private var showingConfirmation = false
-    @State private var searchText = ""
-
-    private var filteredApps: [InstalledAppInfo] {
-        guard !searchText.isEmpty else { return apps }
-        return apps.filter {
-            $0.displayName.localizedCaseInsensitiveContains(searchText) ||
-            $0.bundleID.localizedCaseInsensitiveContains(searchText)
-        }
-    }
-
-    var body: some View {
-        NavigationView {
-            ZStack {
-                themeManager.backgroundGradient().ignoresSafeArea()
-
-                if isLoading {
-                    ProgressView("Scanning installed apps…")
-                        .tint(themeManager.currentTheme.accent)
-                } else if apps.isEmpty {
-                    VStack(spacing: 10) {
-                        Image(systemName: "questionmark.app")
-                            .font(.system(size: 40))
-                            .foregroundColor(themeManager.currentTheme.textSecondary)
-                        Text("No installed app matches this tweak's Filter.")
-                            .font(.subheadline)
-                            .foregroundColor(themeManager.currentTheme.textSecondary)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal)
-                    }
-                } else {
-                    VStack(spacing: 0) {
-                        List {
-                            Section {
-                                ForEach(filteredApps) { app in
-                                    Button(action: { toggle(app) }) {
-                                        HStack {
-                                            VStack(alignment: .leading, spacing: 2) {
-                                                Text(app.displayName)
-                                                    .font(.headline)
-                                                    .foregroundColor(themeManager.currentTheme.textPrimary)
-                                                Text("\(app.bundleID) · v\(app.version)")
-                                                    .font(.caption2)
-                                                    .foregroundColor(themeManager.currentTheme.textSecondary)
-                                            }
-                                            Spacer()
-                                            Image(systemName: selectedBundleIDs.contains(app.bundleID) ? "checkmark.circle.fill" : "circle")
-                                                .foregroundColor(selectedBundleIDs.contains(app.bundleID) ? themeManager.currentTheme.accent : themeManager.currentTheme.textSecondary)
-                                        }
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                            } header: {
-                                Text(headerNote)
-                            } footer: {
-                                Text("Select one or more apps, then confirm below. A full backup is made first for each and restored automatically if anything fails.")
-                            }
-                            .listRowBackground(themeManager.currentTheme.cardBackground.opacity(0.6))
-                        }
-                        .listStyle(.insetGrouped)
-                        .cytrollHideScrollBackground()
-                        .searchable(text: $searchText, prompt: "Search apps")
-
-                        Button(action: { showingConfirmation = true }) {
-                            Text(selectedBundleIDs.isEmpty ? "Select at Least One App" : "Inject Into \(selectedBundleIDs.count) App\(selectedBundleIDs.count == 1 ? "" : "s")")
-                                .font(.headline)
-                                .frame(maxWidth: .infinity)
-                                .padding()
-                        }
-                        .background(selectedBundleIDs.isEmpty ? themeManager.currentTheme.textSecondary.opacity(0.3) : themeManager.currentTheme.accent)
-                        .foregroundColor(.white)
-                        .cornerRadius(12)
-                        .disabled(selectedBundleIDs.isEmpty)
-                        .padding()
-                    }
-                }
-            }
-            .navigationTitle("Inject \(tweak.name)")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
-            }
-            .alert(
-                "Inject Into \(selectedBundleIDs.count) App\(selectedBundleIDs.count == 1 ? "" : "s")?",
-                isPresented: $showingConfirmation
-            ) {
-                Button("Cancel", role: .cancel) {}
-                Button("Inject", role: .destructive) {
-                    onConfirm(apps.filter { selectedBundleIDs.contains($0.bundleID) })
-                }
-            } message: {
-                Text("This patches each selected app's executable to load \(tweak.name). A full backup is made first per app and restored automatically if anything fails. Works only on third-party apps, breaks silently on each app's next update, and needs the app restarted (or the device resprung) to take effect.")
-            }
-        }
-    }
-
-    private func toggle(_ app: InstalledAppInfo) {
-        if selectedBundleIDs.contains(app.bundleID) {
-            selectedBundleIDs.remove(app.bundleID)
-        } else {
-            selectedBundleIDs.insert(app.bundleID)
         }
     }
 }
