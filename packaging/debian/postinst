@@ -1,0 +1,8 @@
+#!/bin/sh
+set -e
+
+if [ -x /var/jb/usr/bin/uicache ]; then
+    /var/jb/usr/bin/uicache -a || true
+fi
+
+exit 0

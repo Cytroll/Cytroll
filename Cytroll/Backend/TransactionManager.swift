@@ -46,7 +46,7 @@ public final class TransactionManager: ObservableObject {
                 var args = ["remove", "-y", "--allow-unauthenticated"]
                 args.append(contentsOf: removes)
                 // Assuming apt-get is available in the rootless bin path
-                let success = self.coreBridge.executeCommand(executable: "/var/jb/usr/bin/apt-get", arguments: args)
+                let success = self.coreBridge.executeAptGet(arguments: args)
                 if !success { overallSuccess = false }
             }
             
@@ -56,7 +56,7 @@ public final class TransactionManager: ObservableObject {
                 self.console.log("Executing Installations/Upgrades via APT...")
                 var args = ["install", "-y", "--allow-unauthenticated"]
                 args.append(contentsOf: installList)
-                let success = self.coreBridge.executeCommand(executable: "/var/jb/usr/bin/apt-get", arguments: args)
+                let success = self.coreBridge.executeAptGet(arguments: args)
                 if !success { overallSuccess = false }
             }
             
@@ -65,7 +65,7 @@ public final class TransactionManager: ObservableObject {
                 self.console.log("Executing Reinstallations via APT...")
                 var args = ["install", "--reinstall", "-y", "--allow-unauthenticated"]
                 args.append(contentsOf: reinstalls)
-                let success = self.coreBridge.executeCommand(executable: "/var/jb/usr/bin/apt-get", arguments: args)
+                let success = self.coreBridge.executeAptGet(arguments: args)
                 if !success { overallSuccess = false }
             }
             

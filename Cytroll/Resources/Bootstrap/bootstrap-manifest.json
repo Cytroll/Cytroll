@@ -1,0 +1,17 @@
+{
+  "_comment": "Verified against https://apt.procurs.us/bootstraps/ (2026-07). sha256 left null — Procursus only publishes .asc GPG signatures for these archives, not plain sha256sums. Fill in manually once you've verified a download if you want BootstrapManager's integrity check to be enforced.",
+  "versions": {
+    "1800": {
+      "fileName": "bootstrap_1800.tar.zst",
+      "url": "https://apt.procurs.us/bootstraps/1800/bootstrap-iphoneos-arm64.tar.zst",
+      "sha256": null,
+      "size": null
+    },
+    "1900": {
+      "fileName": "bootstrap_1900.tar.zst",
+      "url": "https://apt.procurs.us/bootstraps/1900/bootstrap-iphoneos-arm64.tar.zst",
+      "sha256": null,
+      "size": null
+    }
+  }
+}

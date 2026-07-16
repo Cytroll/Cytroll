@@ -1,0 +1,10 @@
+# Cytroll default APT sources (Procursus rootless)
+# {SUITE} is replaced at install time with the Procursus suite number
+# (1800 for iOS 15, 1900 for iOS 16+) — matches BootstrapVersion.aptSuite.
+# Verified format against https://apt.procurs.us/dists/{SUITE}/main/ (2026-07).
+
+deb https://apt.procurs.us/ {SUITE} main
+
+# Popular community repositories (optional — uncomment after bootstrap)
+# deb https://repo.chariz.com/ ./
+# deb https://havoc.app/ ./

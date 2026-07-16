@@ -25,6 +25,11 @@ public struct PackagesTabView: View {
                 }
                 .listStyle(.insetGrouped)
                 .scrollContentBackground(.hidden)
+                .refreshable {
+                    await withCheckedContinuation { continuation in
+                        viewModel.refresh { continuation.resume() }
+                    }
+                }
             }
             .navigationTitle("Packages")
             .searchable(text: $viewModel.searchQuery, prompt: "Search Tweaks & Apps")

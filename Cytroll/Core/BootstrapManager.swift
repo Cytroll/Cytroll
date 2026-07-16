@@ -1,42 +1,25 @@
 import Foundation
 import Combine
 import UIKit
-
-public enum BootstrapVersion: String, CaseIterable, Identifiable {
-    case ios15_16 = "iOS 15.0 - 16.6 (1800)"
-    case ios17 = "iOS 17.0+ (1900)"
-    
-    public var id: String { self.rawValue }
-    
-    public var fileName: String {
-        switch self {
-        case .ios15_16:
-            return "bootstrap_1800.tar.zst"
-        case .ios17:
-            return "bootstrap_1900.tar.zst"
-        }
-    }
-}
+import CryptoKit
 
 public final class BootstrapManager: NSObject, ObservableObject {
     public static let shared = BootstrapManager()
-    
+
     @Published public private(set) var isBootstrapInstalled: Bool = false
     @Published public private(set) var isInstalling: Bool = false
     @Published public private(set) var progress: Double = 0.0
     @Published public private(set) var logs: [String] = []
-    
+
     private let coreBridge = CytrollCoreBridge.shared
     private let console = ConsoleManager.shared
     private var cancellables = Set<AnyCancellable>()
-    
     private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
-    
+
     private override init() {
         super.init()
         checkBootstrapStatus()
-        
-        // Subscribe to console logs to update the local logs array for the UI dynamically
+
         console.$logs
             .receive(on: DispatchQueue.main)
             .sink { [weak self] newLogs in
@@ -44,139 +27,214 @@ public final class BootstrapManager: NSObject, ObservableObject {
             }
             .store(in: &cancellables)
     }
-    
+
     public func checkBootstrapStatus() {
-        let jbPath = "/var/jb"
-        var isDir: ObjCBool = false
-        if FileManager.default.fileExists(atPath: jbPath, isDirectory: &isDir), isDir.boolValue {
-            isBootstrapInstalled = true
-        } else {
-            isBootstrapInstalled = false
-        }
+        isBootstrapInstalled = RootlessPaths.isBootstrapInstalled
     }
-    
+
     public func setupBootstrap(version: BootstrapVersion) {
         guard !isInstalling else { return }
-        
-        // 🚨 CRITICAL: Request Background Task Immunity from iOS
+
         backgroundTaskID = UIApplication.shared.beginBackgroundTask {
             self.console.log("WARNING: iOS forced background termination!")
             UIApplication.shared.endBackgroundTask(self.backgroundTaskID)
         }
-        
+
         DispatchQueue.main.async {
             self.isInstalling = true
             self.progress = 0.0
             self.console.clear()
         }
-        
-        let fileName = version.fileName
-        console.log("Preparing to install Bundled Bootstrap: \(fileName)...")
-        
-        // Execute extraction in background Task
+
         Task {
-            await extractBundledBootstrap(fileName: fileName)
+            await installBootstrap(version: version)
         }
     }
-    
-    private func extractBundledBootstrap(fileName: String) async {
-        let fm = FileManager.default
-        
-        // 1. Locate the .tar.zst file in Binaries folder
-        guard let bootstrapZstURL = Bundle.main.url(forResource: fileName, withExtension: nil, subdirectory: "Binaries") ?? Bundle.main.url(forResource: fileName, withExtension: nil) else {
-            failBootstrap(reason: "Could not find \(fileName) in Binaries folder. Please make sure it is added to the Xcode project.")
+
+    public func autoSetupBootstrap() {
+        setupBootstrap(version: BootstrapVersion.forCurrentOS())
+    }
+
+    // MARK: - Installation pipeline
+
+    private func installBootstrap(version: BootstrapVersion) async {
+        console.log("Starting Procursus rootless bootstrap (\(version.displayName))...")
+
+        guard let archiveURL = await acquireBootstrapArchive(version: version) else {
+            failBootstrap(reason: "Could not obtain bootstrap archive for \(version.fileName).")
             return
         }
-        
-        // الحماية والأمان: التأكد من صلاحية القراءة فقط للملف المضغوط (Read-only)
-        try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: bootstrapZstURL.path)
-        
-        DispatchQueue.main.async { self.progress = 0.2 }
-        
-        // 2. Ensure /var/jb is clean before installing
-        if fm.fileExists(atPath: "/var/jb") {
-            console.log("Removing existing /var/jb directory...")
-            _ = coreBridge.executeCommand(executable: "/bin/rm", arguments: ["-rf", "/var/jb"])
-        }
-        
-        DispatchQueue.main.async { self.progress = 0.3 }
-        
-        // تجهيز المسارات والأدوات
-        guard let zstdPath = getBundledTool(name: "zstd"),
-              let tarPath = getBundledTool(name: "tar") else {
-            failBootstrap(reason: "Missing zstd or tar in Binaries folder.")
-            return
-        }
-        
-        let tarFileName = fileName.replacingOccurrences(of: ".zst", with: "")
-        let tempTarPath = fm.temporaryDirectory.appendingPathComponent(tarFileName).path
-        
-        // 3. Decompress ZST to TAR باستخدام zstd المدمج
-        console.log("Decompressing \(fileName) using bundled zstd...")
-        let zstdSuccess = coreBridge.executeCommand(executable: zstdPath, arguments: [
-            "-d", bootstrapZstURL.path,
-            "-o", tempTarPath,
-            "-f" // Force overwrite
-        ])
-        
-        guard zstdSuccess, fm.fileExists(atPath: tempTarPath) else {
-            failBootstrap(reason: "Failed to decompress ZST archive.")
-            return
-        }
-        
-        DispatchQueue.main.async { self.progress = 0.5 }
-        console.log("Extracting Tar archive to system root (/)....")
-        
-        // 4. Extract the TAR archive باستخدام tar المدمج
-        let extractSuccess = coreBridge.executeCommand(executable: tarPath, arguments: [
-            "-xpf", tempTarPath,
-            "-C", "/"
-        ])
-        
-        // تنظيف الذاكرة: حذف الملف الوسيط (.tar) فوراً
-        try? fm.removeItem(atPath: tempTarPath)
-        
-        guard extractSuccess else {
-            failBootstrap(reason: "Failed to extract tar archive.")
-            return
-        }
-        
-        DispatchQueue.main.async { self.progress = 0.7 }
-        console.log("Setting correct permissions for /var/jb...")
-        
-        // 5. Set permissions using the extracted chmod
-        _ = coreBridge.executeCommand(executable: "/var/jb/usr/bin/chmod", arguments: ["-R", "755", "/var/jb"])
-        
-        // 6. Sign prep_bootstrap.sh if it exists
-        let prepScript = "/var/jb/prep_bootstrap.sh"
-        if fm.fileExists(atPath: prepScript) {
-            console.log("Pseudo-signing prep_bootstrap.sh with bundled ldid...")
-            let ldidPath = getBundledTool(name: "ldid") ?? "/var/jb/usr/bin/ldid"
-            _ = coreBridge.executeCommand(executable: ldidPath, arguments: ["-S", prepScript])
-            
-            console.log("Executing prep_bootstrap.sh...")
-            let scriptSuccess = coreBridge.executeCommand(executable: "/var/jb/usr/bin/sh", arguments: [prepScript])
-            if !scriptSuccess {
-                console.log("WARNING: prep_bootstrap.sh executed with non-zero exit status.")
+
+        await extractBootstrap(from: archiveURL, version: version)
+    }
+
+    /// Remote download first, bundled fallback second.
+    private func acquireBootstrapArchive(version: BootstrapVersion) async -> URL? {
+        DispatchQueue.main.async { self.progress = 0.05 }
+
+        if let entry = BootstrapConfig.manifestEntry(for: version),
+           let remoteURL = URL(string: entry.url) {
+            console.log("Downloading bootstrap from \(entry.url)...")
+            if let downloaded = await downloadBootstrap(from: remoteURL, fileName: version.fileName, expectedSHA256: entry.sha256) {
+                return downloaded
             }
+            console.log("Remote download failed — trying bundled archive...")
         }
-        
-        // 7. Run uicache if available
-        if fm.fileExists(atPath: "/var/jb/usr/bin/uicache") {
-            console.log("Running uicache to refresh app icons...")
-            _ = coreBridge.executeCommand(executable: "/var/jb/usr/bin/uicache", arguments: ["-a"])
+
+        if let bundled = BootstrapConfig.bundledBootstrapURL(for: version) {
+            console.log("Using bundled \(version.fileName)")
+            return bundled
         }
-        
+
+        return nil
+    }
+
+    private func downloadBootstrap(from url: URL, fileName: String, expectedSHA256: String?) async -> URL? {
+        do {
+            let (tempURL, _) = try await URLSession.shared.download(from: url)
+            let dest = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
+            if FileManager.default.fileExists(atPath: dest.path) {
+                try FileManager.default.removeItem(at: dest)
+            }
+            try FileManager.default.moveItem(at: tempURL, to: dest)
+
+            if let expected = expectedSHA256, !expected.isEmpty {
+                let data = try Data(contentsOf: dest)
+                let hash = SHA256.hash(data: data).compactMap { String(format: "%02x", $0) }.joined()
+                guard hash.lowercased() == expected.lowercased() else {
+                    console.log("SHA256 mismatch for downloaded bootstrap.")
+                    try? FileManager.default.removeItem(at: dest)
+                    return nil
+                }
+            }
+
+            DispatchQueue.main.async { self.progress = 0.2 }
+            return dest
+        } catch {
+            console.log("Download error: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    private func extractBootstrap(from archiveURL: URL, version: BootstrapVersion) async {
+        let fm = FileManager.default
+
+        try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: archiveURL.path)
+
+        if fm.fileExists(atPath: RootlessPaths.prefix) {
+            console.log("Removing existing \(RootlessPaths.prefix)...")
+            _ = coreBridge.executeCommand(executable: "/bin/rm", arguments: ["-rf", RootlessPaths.prefix])
+        }
+
+        DispatchQueue.main.async { self.progress = 0.3 }
+
+        guard let zstdPath = BootstrapConfig.bundledToolPath("zstd"),
+              let tarPath = BootstrapConfig.bundledToolPath("tar") else {
+            failBootstrap(reason: "Missing zstd or tar in app Binaries/.")
+            return
+        }
+
+        let tarFileName = version.fileName.replacingOccurrences(of: ".zst", with: "")
+        let tempTarPath = fm.temporaryDirectory.appendingPathComponent(tarFileName).path
+
+        console.log("Decompressing \(version.fileName)...")
+        let zstdOK = coreBridge.executeCommand(executable: zstdPath, arguments: [
+            "-d", archiveURL.path, "-o", tempTarPath, "-f"
+        ])
+
+        guard zstdOK, fm.fileExists(atPath: tempTarPath) else {
+            failBootstrap(reason: "Failed to decompress bootstrap archive.")
+            return
+        }
+
+        DispatchQueue.main.async { self.progress = 0.5 }
+        console.log("Extracting Procursus tree to / (creates \(RootlessPaths.prefix))...")
+
+        let extractOK = coreBridge.executeCommand(executable: tarPath, arguments: [
+            "-xpf", tempTarPath, "-C", "/"
+        ])
+        try? fm.removeItem(atPath: tempTarPath)
+
+        guard extractOK else {
+            failBootstrap(reason: "Failed to extract bootstrap tar archive.")
+            return
+        }
+
+        DispatchQueue.main.async { self.progress = 0.7 }
+
+        _ = coreBridge.executeCommand(
+            executable: RootlessPaths.chmod,
+            arguments: ["-R", "755", RootlessPaths.prefix]
+        )
+
+        runPrepBootstrapScript()
+        seedDefaultSources(version: version)
+
+        if fm.fileExists(atPath: RootlessPaths.uicache) {
+            console.log("Running uicache...")
+            _ = coreBridge.executeCommand(executable: RootlessPaths.uicache, arguments: ["-a"])
+        }
+
+        // Bootstrap just laid down a fresh dpkg database and seeded sources —
+        // make sure the shared package cache reflects that instead of
+        // whatever (empty) state it held before the rootless env existed.
+        PackageIndexStore.shared.refresh()
+
         DispatchQueue.main.async {
             self.progress = 1.0
-            self.console.log("Bootstrap installation completed successfully!")
+            self.console.log("Bootstrap ready at \(RootlessPaths.effectivePrefix)")
             self.isInstalling = false
             self.isBootstrapInstalled = true
             self.checkBootstrapStatus()
             self.endBackgroundImmunity()
         }
     }
-    
+
+    private func runPrepBootstrapScript() {
+        let fm = FileManager.default
+        let script = RootlessPaths.prepBootstrapScript
+        guard fm.fileExists(atPath: script) else { return }
+
+        console.log("Signing and running prep_bootstrap.sh...")
+        let ldidPath = BootstrapConfig.bundledToolPath("ldid") ?? RootlessPaths.ldid
+        _ = coreBridge.executeCommand(executable: ldidPath, arguments: ["-S", script])
+
+        if !coreBridge.executeCommand(executable: RootlessPaths.sh, arguments: [script]) {
+            console.log("WARNING: prep_bootstrap.sh returned non-zero.")
+        }
+    }
+
+    /// Writes default Procursus APT sources so user can add packages immediately.
+    private func seedDefaultSources(version: BootstrapVersion) {
+        let fm = FileManager.default
+        let sourcesDir = RootlessPaths.sourcesListDir
+        let targetFile = RootlessPaths.cytrollSourcesFile
+
+        if !fm.fileExists(atPath: sourcesDir) {
+            try? fm.createDirectory(atPath: sourcesDir, withIntermediateDirectories: true)
+        }
+
+        if fm.fileExists(atPath: targetFile) {
+            console.log("Sources file already exists — skipping default seed.")
+            return
+        }
+
+        let lines = BootstrapConfig.defaultSources(for: version)
+            .map { $0.replacingOccurrences(of: "{SUITE}", with: version.aptSuite) }
+        let content = lines.joined(separator: "\n") + "\n"
+
+        do {
+            try content.write(toFile: targetFile, atomically: true, encoding: .utf8)
+            console.log("Seeded default Procursus sources (\(version.aptSuite)).")
+            _ = coreBridge.executeCommand(
+                executable: RootlessPaths.aptGet,
+                arguments: ["update", "--allow-insecure-repositories"]
+            )
+        } catch {
+            console.log("Failed to seed default sources: \(error.localizedDescription)")
+        }
+    }
+
     private func failBootstrap(reason: String) {
         console.log("BOOTSTRAP ERROR: \(reason)")
         DispatchQueue.main.async {
@@ -186,28 +244,11 @@ public final class BootstrapManager: NSObject, ObservableObject {
             self.endBackgroundImmunity()
         }
     }
-    
+
     private func endBackgroundImmunity() {
         if backgroundTaskID != .invalid {
             UIApplication.shared.endBackgroundTask(backgroundTaskID)
             backgroundTaskID = .invalid
         }
-    }
-    
-    private func getBundledTool(name: String) -> String? {
-        let path = Bundle.main.bundlePath + "/Binaries/\(name)"
-        if FileManager.default.fileExists(atPath: path) {
-            // إعطاء صلاحية التنفيذ (chmod +x) للأدوات التنفيذية
-            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
-            return path
-        }
-        return nil
-    }
-    
-    /// Auto-detects iOS version and sets up the correct bootstrap
-    public func autoSetupBootstrap() {
-        let major = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
-        let version: BootstrapVersion = (major >= 17) ? .ios17 : .ios15_16
-        setupBootstrap(version: version)
     }
 }

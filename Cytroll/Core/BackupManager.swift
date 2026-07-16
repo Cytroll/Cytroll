@@ -40,16 +40,14 @@ public final class BackupManager {
     
     private init() {}
     
-    /// Generates a backup document containing all currently installed tweaks.
+    /// Generates a backup document containing all currently installed tweaks (Real Implementation).
     public func createBackup() -> BackupDocument {
-        // In a full production environment, this would strictly call DpkgStatusParser.
-        // For architectural safety, we extract standard user tweaks if available.
-        let installedIDs = [
-            "com.ellekit.ellekit",
-            "xyz.wotsit.snowboard",
-            "com.opa334.choicy",
-            "com.cytroll.essential"
-        ]
+        // نقرأ من المخزن المشترك بدل تحليل dpkg status من جديد كل مرة
+        PackageIndexStore.shared.ensureLoadedBlocking()
+        let installedPackages = PackageIndexStore.shared.installedPackagesSnapshot()
+        
+        // نستخرج فقط الـ IDs الخاصة بالحزم
+        let installedIDs = installedPackages.map { $0.id }
         
         let backup = CytrollBackup(
             version: "1.0",
@@ -59,16 +57,38 @@ public final class BackupManager {
         return BackupDocument(backup: backup)
     }
     
-    /// Parses a backup document and enqueues all missing tweaks for installation.
+    /// Parses a backup document and adds all missing tweaks to the Queue for installation.
     public func restoreFromBackup(_ backup: CytrollBackup) {
         let queueManager = QueueManager.shared
         
+        // جلب الحزم المتوفرة في السورسات من المخزن المشترك (أحدث نسخة لكل حزمة)
+        PackageIndexStore.shared.ensureLoadedBlocking()
+        let repoDict = PackageIndexStore.shared.bestRepoByIDSnapshot()
+        
+        var count = 0
         for id in backup.packageIDs {
-            // Find package in repos or create a placeholder to trigger download
-            let pkg = Package(id: id, name: id, version: "Latest", description: "Restored from Backup", architecture: "iphoneos-arm64", author: "Backup", section: "Tweaks")
-            queueManager.enqueue(package: pkg, action: .install)
+            if let realPkg = repoDict[id] {
+                // الحزمة موجودة في السورسات، نضيفها للطابور
+                queueManager.addOrUpdate(package: realPkg, action: .install)
+                count += 1
+            } else {
+                // الحزمة غير موجودة في السورسات (مجهولة)، نقوم بإنشاء هيكل مبدئي لها
+                let fallbackPkg = Package(
+                    id: id, 
+                    name: id, 
+                    version: "Latest", 
+                    author: "Unknown (Missing Source)", 
+                    architecture: "iphoneos-arm64", 
+                    description: "Restored from Backup but source is missing.",
+                    isInstalled: false,
+                    isBroken: false,
+                    action: .install
+                )
+                queueManager.addOrUpdate(package: fallbackPkg, action: .install)
+                count += 1
+            }
         }
         
-        ConsoleManager.shared.log("Restored \(backup.packageIDs.count) tweaks to the Queue.")
+        ConsoleManager.shared.log("Restored \(count) tweaks to the Queue.")
     }
 }

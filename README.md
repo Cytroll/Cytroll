@@ -32,11 +32,11 @@ The Swift UI layer passes execution commands as arguments to `cytrollhelper`, wh
 ## Building
 
 1. Clone this repository.
-2. Open the project in Xcode.
-3. Make sure `Cytroll.entitlements` is selected in the Target's Signing & Capabilities for the main app.
-4. Compile your `cytrollhelper` binary in C/Swift, sign it with root entitlements, and embed it in the App Bundle.
-5. Build the Xcode project.
-6. Export as `.ipa` or `.tipa` and install via TrollStore.
+2. Open the project in Xcode. `Cytroll.entitlements` is already wired as `CODE_SIGN_ENTITLEMENTS` for the main target.
+3. Run `Scripts/fetch-binaries.sh` on macOS to fetch `ldid`, `tar`, `zstd` into `Binaries/`.
+4. Run `./build.sh` — it compiles `cytrollhelper` from `Cytroll/Core/RootHelper/cytrollhelper.c`, pseudo-signs everything with `ldid` using `Cytroll.entitlements`, and packages `Cytroll.tipa`.
+5. Alternatively, build the Xcode project directly (`CODE_SIGNING_ALLOWED=NO`) and run the signing steps from `build.sh` manually.
+6. Install the resulting `.tipa`/`.ipa` via TrollStore.
 
 ## Credits
 

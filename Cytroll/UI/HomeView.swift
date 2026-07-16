@@ -33,7 +33,7 @@ public struct HomeView: View {
     }
     
     // MARK: - Bootstrap Gatekeeper Subview
-    @State private var selectedBootstrapVersion: BootstrapVersion = .ios15_16
+    @State private var selectedBootstrapVersion: BootstrapVersion = BootstrapVersion.forCurrentOS()
     
     private var bootstrapGatekeeper: some View {
         VStack(spacing: 24) {
@@ -56,7 +56,7 @@ public struct HomeView: View {
                     .foregroundColor(bootstrapManager.isBootstrapInstalled ? .green : .red)
                     .font(.title3)
                 
-                Text(bootstrapManager.isBootstrapInstalled ? "Ready (/private/var/jb)" : "Not Found / Missing")
+                Text(bootstrapManager.isBootstrapInstalled ? "Ready (\(RootlessPaths.effectivePrefix))" : "Not Found / Missing")
                     .font(.headline)
                     .foregroundColor(themeManager.currentTheme.textPrimary)
             }

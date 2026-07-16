@@ -50,13 +50,9 @@ public struct SourcesView: View {
                 .listStyle(.insetGrouped)
                 .scrollContentBackground(.hidden)
                 .refreshable {
-                    // Simulating a fast APT index update process
                     await withCheckedContinuation { continuation in
-                        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 1.0) {
-                            // In a real scenario, this would trigger AptIndexParser to refresh sources
-                            DispatchQueue.main.async {
-                                continuation.resume()
-                            }
+                        repoManager.refreshAll {
+                            continuation.resume()
                         }
                     }
                 }

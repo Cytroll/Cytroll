@@ -1,0 +1,26 @@
+# macOS
+.DS_Store
+
+# Xcode
+build/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+xcuserdata/
+
+# Build outputs (produced by build.sh / Scripts/build-deb.sh)
+Payload/
+dist/
+*.ipa
+*.tipa
+*.deb
+
+# Fetched/compiled tools — not source, downloaded by Scripts/fetch-binaries.sh
+# or compiled by build.sh. Keep the folder's README for documentation.
+Binaries/*
+!Binaries/README.md
+
+# Bootstrap archives are large binary blobs; never commit them
+*.tar.zst

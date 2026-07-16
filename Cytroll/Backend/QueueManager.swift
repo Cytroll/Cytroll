@@ -40,12 +40,31 @@ public final class QueueManager: ObservableObject {
         queue.removeAll { $0.id == package.id }
     }
     
-    /// Execute the entire queue by handing it off to the TransactionManager
+    /// Execute the entire queue by handing it off to the TransactionManager.
+    /// Runs a dependency/conflict pre-flight check first — hard conflicts
+    /// abort before dpkg/apt is ever touched.
     public func confirmAndExecute(completion: @escaping (Bool) -> Void) {
         guard !queue.isEmpty, !isProcessing else { return }
         
         isProcessing = true
         console.clear() // Clear logs from previous runs
+
+        let issues = DependencyResolver.shared.resolve(queue: queue)
+        let blockingIssues = issues.filter { $0.isBlocking }
+
+        if !blockingIssues.isEmpty {
+            console.log("Transaction blocked — resolve these conflicts first:")
+            for issue in blockingIssues {
+                console.log("CONFLICT: \(issue.message)")
+            }
+            isProcessing = false
+            completion(false)
+            return
+        }
+
+        for issue in issues where !issue.isBlocking {
+            console.log("NOTICE: \(issue.message)")
+        }
         
         // 🚨 CRITICAL: Request Background Task Immunity from iOS
         // This ensures iOS doesn't kill the app if the user goes to the Home Screen,
@@ -59,7 +78,12 @@ public final class QueueManager: ObservableObject {
         
         transactionManager.executeTransaction(queue: queue) { [weak self] success in
             guard let self = self else { return }
-            
+
+            // dpkg status just changed on disk (installs/removes/upgrades) —
+            // invalidate the shared cache so Packages/Changes/Sources reflect
+            // reality on next read instead of the pre-transaction snapshot.
+            PackageIndexStore.shared.refresh()
+
             // Delay clearing the UI state so the user can see the final status
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
                 if success {

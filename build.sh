@@ -28,6 +28,10 @@ mkdir -p Payload
 # نسخ التطبيق المُجمّع من مسار البناء الخاص بـ Xcode
 cp -r build/Build/Products/Release-iphoneos/Cytroll.app Payload/
 
+echo "    -> Compiling cytrollhelper from C source..."
+mkdir -p Payload/Cytroll.app/Binaries
+xcrun -sdk iphoneos clang -arch arm64 -o Payload/Cytroll.app/Binaries/cytrollhelper Cytroll/Core/RootHelper/cytrollhelper.c
+
 echo "[*] Step 4: Pseudo-signing with ldid (The TrollStore Magic)..."
 # هذه الخطوة هي التي تزرع صلاحيات التخطي داخل التطبيق وملفاته لكي يقبلها TrollStore
 

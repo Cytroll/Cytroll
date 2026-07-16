@@ -3,7 +3,7 @@ import Foundation
 public final class AptIndexParser {
     public static let shared = AptIndexParser()
     
-    private let aptListsPath = "/var/jb/var/lib/apt/lists/"
+    private var aptListsPath: String { RootlessPaths.aptListsDir + "/" }
     
     private init() {}
     
@@ -21,46 +21,39 @@ public final class AptIndexParser {
         
         for file in packageFiles {
             let path = aptListsPath + file
-            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-                  let content = String(data: data, encoding: .utf8) else {
-                continue
-            }
-            
-            // استخراج عنوان السورس تقريبياً من اسم الملف
-            // مثال: repo.chariz.com_._Packages -> repo.chariz.com
-            var sourceURLGuess: String? = nil
-            if let firstUnderscoreIndex = file.firstIndex(of: "_") {
-                sourceURLGuess = "https://" + String(file[..<firstUnderscoreIndex])
-            }
-            
-            let blocks = content.components(separatedBy: "\n\n")
-            
-            for block in blocks {
-                guard !block.isEmpty else { continue }
-                
-                var id = "", name = "", version = "", author = "", architecture = "", description = ""
-                
-                let lines = block.components(separatedBy: .newlines)
-                for line in lines {
-                    if line.hasPrefix("Package: ") {
-                        id = String(line.dropFirst(9))
-                    } else if line.hasPrefix("Name: ") {
-                        name = String(line.dropFirst(6))
-                    } else if line.hasPrefix("Version: ") {
-                        version = String(line.dropFirst(9))
-                    } else if line.hasPrefix("Author: ") || line.hasPrefix("Maintainer: ") {
-                        author = String(line.dropFirst(line.hasPrefix("Author: ") ? 8 : 12))
-                    } else if line.hasPrefix("Architecture: ") {
-                        architecture = String(line.dropFirst(14))
-                    } else if line.hasPrefix("Description: ") {
-                        description = String(line.dropFirst(13))
-                    }
+            // `autoreleasepool` ensures the (potentially multi-MB) String for
+            // this file is released before the next iteration allocates the
+            // next one, instead of all of them lingering until the loop ends.
+            autoreleasepool {
+                guard let content = try? String(contentsOfFile: path, encoding: .utf8) else {
+                    return
                 }
-                
-                if name.isEmpty { name = id }
-                
-                if !id.isEmpty {
-                    let pkg = Package(id: id, name: name, version: version, author: author, architecture: architecture, description: description, sourceURL: sourceURLGuess)
+
+                // استخراج عنوان السورس تقريبياً من اسم الملف
+                // مثال: repo.chariz.com_._Packages -> repo.chariz.com
+                var sourceURLGuess: String? = nil
+                if let firstUnderscoreIndex = file.firstIndex(of: "_") {
+                    sourceURLGuess = "https://" + String(file[..<firstUnderscoreIndex])
+                }
+
+                // Streaming parse — avoids materializing the whole file as a
+                // `[block]` array (and each block as a `[line]` array) at once.
+                ControlFieldParser.forEachBlock(in: content) { fields in
+                    guard let id = fields["Package"], !id.isEmpty else { return }
+
+                    let name = fields["Name"].flatMap { $0.isEmpty ? nil : $0 } ?? id
+                    let pkg = Package(
+                        id: id,
+                        name: name,
+                        version: fields["Version"] ?? "",
+                        author: fields["Author"] ?? fields["Maintainer"] ?? "",
+                        architecture: fields["Architecture"] ?? "",
+                        description: fields["Description"] ?? "",
+                        sourceURL: sourceURLGuess,
+                        section: fields["Section"] ?? "Unknown",
+                        dependsGroups: ControlFieldParser.parseDependsGroups(fields["Depends"]),
+                        conflicts: ControlFieldParser.parseFlatPackageList(fields["Conflicts"])
+                    )
                     repoPackages.append(pkg)
                 }
             }

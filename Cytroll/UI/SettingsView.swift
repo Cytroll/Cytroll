@@ -3,6 +3,7 @@ import UniformTypeIdentifiers
 
 public struct SettingsView: View {
     @StateObject private var themeManager = ThemeManager.shared
+    @StateObject private var diagnostics = DiagnosticsManager.shared
     @State private var tweaksEnabled: Bool = JailbreakUtilities.shared.areTweaksEnabled()
     @State private var showingRemoveAlert = false
     @State private var isRemoving = false
@@ -11,6 +12,9 @@ public struct SettingsView: View {
     @State private var showingExporter = false
     @State private var showingImporter = false
     @State private var backupDocument: BackupDocument?
+    
+    // Live Diagnostics Console State
+    @State private var showingDiagnosticsConsole = false
     
     public init() {}
     
@@ -77,6 +81,15 @@ public struct SettingsView: View {
                             JailbreakUtilities.shared.setTweaksEnabled(newValue)
                         }
                         
+                        NavigationLink(destination: TweaksManagerView()) {
+                            HStack {
+                                Image(systemName: "list.bullet.rectangle.portrait.fill")
+                                    .foregroundColor(themeManager.currentTheme.accent)
+                                Text("Manage Injected Tweaks")
+                                    .foregroundColor(themeManager.currentTheme.textPrimary)
+                            }
+                        }
+                        
                         if !tweaksEnabled {
                             Text("Safe Mode active. Tweaks are disabled. Please perform a Userspace Reboot to apply changes.")
                                 .font(.caption)
@@ -111,6 +124,22 @@ public struct SettingsView: View {
                     }
                     .listRowBackground(themeManager.currentTheme.cardBackground.opacity(0.6))
                     .foregroundColor(themeManager.currentTheme.textPrimary)
+                    
+                    // MARK: Advanced Diagnostics
+                    Section(header: Text("System Diagnostics").foregroundColor(themeManager.currentTheme.textSecondary)) {
+                        Button(action: {
+                            showingDiagnosticsConsole = true
+                            diagnostics.runFullDiagnostics { _ in }
+                        }) {
+                            HStack {
+                                Image(systemName: "stethoscope")
+                                Text(diagnostics.isRepairing ? "Repairing System..." : "Run Advanced Diagnostics")
+                            }
+                        }
+                        .disabled(diagnostics.isRepairing)
+                    }
+                    .listRowBackground(themeManager.currentTheme.cardBackground.opacity(0.6))
+                    .foregroundColor(.orange)
                     
                     // MARK: Danger Zone
                     Section(header: Text("Danger Zone").foregroundColor(.red)) {
@@ -180,7 +209,16 @@ public struct SettingsView: View {
                     }
                 }
             } message: {
-                Text("This will permanently delete /var/jb including all your tweaks and preferences. Your device will return to Stock iOS state. This cannot be undone.")
+                Text("This will permanently delete \(RootlessPaths.prefix) including all your tweaks and preferences. Your device will return to stock iOS state. This cannot be undone.")
+            }
+            
+            // Live Console Cover for Diagnostics
+            .fullScreenCover(isPresented: $showingDiagnosticsConsole) {
+                LiveConsoleView(
+                    isPresented: $showingDiagnosticsConsole,
+                    isRunning: diagnostics.isRepairing,
+                    title: "System Diagnostics"
+                )
             }
         }
     }

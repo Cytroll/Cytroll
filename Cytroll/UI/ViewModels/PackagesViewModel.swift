@@ -1,57 +1,43 @@
 import Foundation
 import Combine
 
+/// Thin presentation layer over `PackageIndexStore` — search filtering only.
+/// No parsing happens here anymore: the merged installed+repo list is
+/// computed once in the shared store and simply mirrored via Combine, so
+/// opening this tab never re-parses `dpkg status`/`_Packages` on its own.
 public final class PackagesViewModel: ObservableObject {
     @Published public private(set) var packages: [Package] = []
     @Published public var searchQuery: String = ""
-    
+
+    private var cancellable: AnyCancellable?
+
     public init() {
-        loadPackagesFromBackend()
+        let store = PackageIndexStore.shared
+        packages = store.mergedPackages
+
+        cancellable = store.$mergedPackages
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in self?.packages = $0 }
+
+        store.ensureLoaded()
     }
-    
+
     public var filteredPackages: [Package] {
         if searchQuery.isEmpty {
             return packages
         } else {
-            return packages.filter { 
-                $0.name.localizedCaseInsensitiveContains(searchQuery) || 
-                $0.id.localizedCaseInsensitiveContains(searchQuery) 
+            return packages.filter {
+                $0.name.localizedCaseInsensitiveContains(searchQuery) ||
+                $0.id.localizedCaseInsensitiveContains(searchQuery)
             }
         }
     }
-    
-    public func loadPackagesFromBackend() {
-        // Background parsing to ensure UI does not freeze during heavy IO parsing
-        DispatchQueue.global(qos: .userInitiated).async {
-            // Load installed packages from the dpkg status file natively
-            let installedPackages = DpkgStatusParser.shared.parseInstalledPackages()
-            
-            // Add packages from the APT repos natively
-            let repoPackages = AptIndexParser.shared.parseRepoPackages()
-            
-            // Merge logic: preserve installed state, but inject sourceURL from repo if available
-            var finalDict = [String: Package]()
-            
-            // 1. Add repo packages first
-            for pkg in repoPackages {
-                finalDict[pkg.id] = pkg
-            }
-            
-            // 2. Override/Update with installed packages
-            for installedPkg in installedPackages {
-                var mutableInstalledPkg = installedPkg
-                if let repoPkg = finalDict[mutableInstalledPkg.id] {
-                    // If it's in a repo, borrow its sourceURL so we know where it came from
-                    mutableInstalledPkg.sourceURL = repoPkg.sourceURL
-                }
-                finalDict[mutableInstalledPkg.id] = mutableInstalledPkg
-            }
-            
-            let finalPackages = Array(finalDict.values)
-            
-            DispatchQueue.main.async {
-                self.packages = finalPackages.sorted { $0.name.lowercased() < $1.name.lowercased() }
-            }
+
+    /// Pull-to-refresh: forces a fresh re-parse of both `dpkg status` and
+    /// the repo indices.
+    public func refresh(completion: (() -> Void)? = nil) {
+        PackageIndexStore.shared.refresh {
+            DispatchQueue.main.async { completion?() }
         }
     }
 }
