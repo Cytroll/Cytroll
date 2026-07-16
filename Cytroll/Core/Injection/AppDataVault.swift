@@ -1,7 +1,9 @@
 import Foundation
 import Combine
 
-public struct AppDataBackup: Identifiable, Codable, Equatable {
+/// nonisolated so background encode/decode works under Xcode 26 / Swift 6
+/// default MainActor isolation (same pattern as `CytrollBackup`).
+public nonisolated struct AppDataBackup: Identifiable, Codable, Equatable, Sendable {
     public var id: String { "\(bundleID)::\(timestamp)" }
     public let bundleID: String
     public let appDisplayName: String

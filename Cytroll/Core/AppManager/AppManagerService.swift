@@ -273,12 +273,14 @@ public final class AppManagerService: ObservableObject {
 
         // If injections exist, strip first so we don't leave orphan pristine backups.
         let records = recordStore.records(forBundleID: app.bundleID)
-        let proceedDelete = { [weak self] in
+        let proceedDelete: () -> Void = { [weak self] in
             self?.performDelete(app, finish: finish)
         }
 
         if records.isEmpty {
-            DispatchQueue.global(qos: .userInitiated).async(execute: proceedDelete)
+            DispatchQueue.global(qos: .userInitiated).async {
+                proceedDelete()
+            }
             return
         }
 
@@ -292,7 +294,9 @@ public final class AppManagerService: ObservableObject {
             if case .failure(let error) = result {
                 ConsoleManager.shared.log("Strip before delete warned: \(error.localizedDescription)")
             }
-            DispatchQueue.global(qos: .userInitiated).async(execute: proceedDelete)
+            DispatchQueue.global(qos: .userInitiated).async {
+                proceedDelete()
+            }
         }
     }
 
