@@ -23,10 +23,15 @@ public final class PackagesViewModel: ObservableObject {
     }
 
     public var filteredPackages: [Package] {
+        let settings = PackageManagerSettings.shared
+        let compatible = settings.filterIncompatiblePackages
+            ? packages.filter { settings.isCompatible($0) }
+            : packages
+
         if searchQuery.isEmpty {
-            return packages
+            return compatible
         } else {
-            return packages.filter {
+            return compatible.filter {
                 $0.name.localizedCaseInsensitiveContains(searchQuery) ||
                 $0.id.localizedCaseInsensitiveContains(searchQuery)
             }

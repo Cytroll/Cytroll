@@ -8,18 +8,28 @@ public enum InjectionStatus: String, Codable {
     /// updates replace the executable wholesale, silently reverting the
     /// patch. Needs one tap to re-inject.
     case needsReapply
-    /// An inject attempt failed AND the automatic rollback it triggered
-    /// didn't fully complete (e.g. a filesystem op mid-rollback also
-    /// failed) — the app may be left inconsistent. `backupPath` still
-    /// points at the verified pre-injection backup; the only allowed next
-    /// step is restoring from it (re-inject is blocked until then, see
-    /// `AppInjectionManager.performInject`).
+    /// A rebuild (inject/restore/re-inject) failed AND the atomic swap's
+    /// own automatic recovery didn't fully complete (extremely rare — a
+    /// filesystem op failing twice in a row) — the app may be left
+    /// inconsistent. There's no per-record backup anymore (see
+    /// `AppPristineBackupStore`, shared per app rather than per tweak);
+    /// the only allowed next step is restoring, which forces a rebuild
+    /// from the shared pristine backup (re-inject is blocked until then,
+    /// see `AppInjectionManager.performInject`). A background sweep
+    /// (`AppInjectionManager.recoverStrayTempDirectories`) also runs on
+    /// every launch to self-heal the underlying files where possible.
     case failed
 }
 
 /// Persisted record of one tweak-into-app injection, so the Tweaks UI can
 /// show "Injected Apps" and detect drift (target app updated) across
 /// launches without re-scanning every app's Mach-O load commands.
+///
+/// Deliberately holds NO backup path of its own — multiple records can
+/// share the same `bundleID`, and their app's one true backup lives in
+/// `AppPristineBackupStore`, keyed by `bundleID` alone, so restoring or
+/// re-injecting any single tweak always rebuilds from the same untouched
+/// original regardless of how many other tweaks are also active on it.
 public struct InjectionRecord: Identifiable, Codable, Hashable {
     public var id: String { "\(tweakID)::\(bundleID)" }
 
@@ -27,12 +37,11 @@ public struct InjectionRecord: Identifiable, Codable, Hashable {
     public let tweakName: String
     public let bundleID: String
     public let appDisplayName: String
-    /// Full path to the backed-up `.app` bundle copy, e.g.
-    /// `/var/jb/var/cytroll/backups/<bundleID>/<timestamp>/<Name>.app`.
-    public let backupPath: String
-    /// `CFBundleShortVersionString` of the target app at injection time —
-    /// compared against its current version to flag `.needsReapply`.
-    public let injectedAppVersion: String
+    /// `CFBundleShortVersionString` of the target app the last time this
+    /// tweak's dylib was (re)applied — compared against its current
+    /// version to flag `.needsReapply`. Kept in sync across every record
+    /// sharing a `bundleID` whenever any one of them triggers a rebuild.
+    public var injectedAppVersion: String
     /// Where the tweak's dylib was copied to inside the target bundle.
     public let dylibDestinationPath: String
     public var status: InjectionStatus
@@ -43,7 +52,6 @@ public struct InjectionRecord: Identifiable, Codable, Hashable {
         tweakName: String,
         bundleID: String,
         appDisplayName: String,
-        backupPath: String,
         injectedAppVersion: String,
         dylibDestinationPath: String,
         status: InjectionStatus = .active,
@@ -53,7 +61,6 @@ public struct InjectionRecord: Identifiable, Codable, Hashable {
         self.tweakName = tweakName
         self.bundleID = bundleID
         self.appDisplayName = appDisplayName
-        self.backupPath = backupPath
         self.injectedAppVersion = injectedAppVersion
         self.dylibDestinationPath = dylibDestinationPath
         self.status = status
@@ -119,6 +126,13 @@ public final class InjectionRecordStore: ObservableObject {
 
     public func records(forTweakID tweakID: String) -> [InjectionRecord] {
         records.filter { $0.tweakID == tweakID }
+    }
+
+    /// Every tweak currently injected into one specific app — this is
+    /// exactly the "desired set" `AppInjectionManager` rebuilds from on
+    /// every inject/restore for that `bundleID`.
+    public func records(forBundleID bundleID: String) -> [InjectionRecord] {
+        records.filter { $0.bundleID == bundleID }
     }
 
     /// Re-checks every record's target app version against what's

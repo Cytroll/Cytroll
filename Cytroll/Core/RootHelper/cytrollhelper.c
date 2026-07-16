@@ -45,18 +45,28 @@ static int contains_path_traversal(const char *path) {
  * the *installed, read-only* app container (Bundle/Application) — never
  * the Data container, which is writable at runtime and could be used to
  * smuggle in a malicious "fake.app/Binaries/evil" path.
+ *
+ * NOTE: these root prefixes are deliberately written WITHOUT a trailing
+ * slash. path_has_prefix() already requires whatever follows the matched
+ * prefix to be '/' or end-of-string — feeding it a prefix that itself
+ * already ends in '/' makes that boundary check look for a character
+ * right after that slash (e.g. the first digit of a UUID directory name),
+ * which is never '/' or '\0' for any real path, so the prefix would never
+ * match ANY actual file. (Contrast with the "/var/jb" prefix a few lines
+ * up, which has no trailing slash and works correctly for exactly this
+ * reason — that inconsistency was the bug.)
  */
+static const char *kBundleApplicationRoots[] = {
+    "/private/var/containers/Bundle/Application",
+    "/var/containers/Bundle/Application",
+    NULL
+};
+
 static int is_bundled_binary_path(const char *path) {
     if (contains_path_traversal(path)) return 0;
 
-    static const char *bundle_roots[] = {
-        "/private/var/containers/Bundle/Application/",
-        "/var/containers/Bundle/Application/",
-        NULL
-    };
-
-    for (int i = 0; bundle_roots[i]; i++) {
-        if (path_has_prefix(path, bundle_roots[i]) && strstr(path, ".app/Binaries/") != NULL) {
+    for (int i = 0; kBundleApplicationRoots[i]; i++) {
+        if (path_has_prefix(path, kBundleApplicationRoots[i]) && strstr(path, ".app/Binaries/") != NULL) {
             return 1;
         }
     }
@@ -78,20 +88,29 @@ static int is_bundled_binary_path(const char *path) {
  * still rejected. Apple's own system apps and SpringBoard never live
  * under this path (they ship on the sealed, read-only system volume), so
  * they are excluded by construction, not by an extra name check.
+ *
+ * Three shapes of argument are allowed here, all strictly rooted under a
+ * real Bundle/Application path:
+ *   1. Anything *inside* a `.app` bundle (main executable, Frameworks/...).
+ *   2. The bare `.app` bundle directory itself (whole-bundle cp/mv/rm —
+ *      taking/restoring a full backup, or the atomic-swap rename).
+ *   3. Cytroll's own sibling temp directories next to a bundle, named
+ *      "<Name>.app.cytroll_<suffix>" (staged rebuild copy / renamed-aside
+ *      original during AppInjectionManager's atomic swap) — never a path
+ *      inside another app, always a sibling of the real bundle.
  */
 static int is_third_party_app_bundle_path(const char *path) {
     if (contains_path_traversal(path)) return 0;
 
-    static const char *bundle_roots[] = {
-        "/private/var/containers/Bundle/Application/",
-        "/var/containers/Bundle/Application/",
-        NULL
-    };
+    for (int i = 0; kBundleApplicationRoots[i]; i++) {
+        if (!path_has_prefix(path, kBundleApplicationRoots[i])) continue;
 
-    for (int i = 0; bundle_roots[i]; i++) {
-        if (path_has_prefix(path, bundle_roots[i]) && strstr(path, ".app/") != NULL) {
-            return 1;
-        }
+        if (strstr(path, ".app/") != NULL) return 1;
+
+        size_t len = strlen(path);
+        if (len >= 4 && strcmp(path + len - 4, ".app") == 0) return 1;
+
+        if (strstr(path, ".app.cytroll_") != NULL) return 1;
     }
     return 0;
 }

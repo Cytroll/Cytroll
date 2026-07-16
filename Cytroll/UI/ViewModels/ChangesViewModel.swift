@@ -20,13 +20,22 @@ public final class ChangesViewModel: ObservableObject {
     @Published public private(set) var updates: [PackageUpdate] = []
     @Published public private(set) var isRefreshing: Bool = false
 
-    private var cancellable: AnyCancellable?
+    private var cancellables = Set<AnyCancellable>()
 
     public init() {
         let store = PackageIndexStore.shared
-        cancellable = store.$installedPackages
+        store.$installedPackages
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.recomputeUpdates() }
+            .store(in: &cancellables)
+
+        // Holding/unholding a package from Package Details should
+        // immediately add/remove it from this list without needing a
+        // manual pull-to-refresh.
+        PackageHoldManager.shared.$heldPackageIDs
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.recomputeUpdates() }
+            .store(in: &cancellables)
 
         store.ensureLoaded { [weak self] in
             DispatchQueue.main.async { self?.recomputeUpdates() }
@@ -53,8 +62,12 @@ public final class ChangesViewModel: ObservableObject {
         let installed = PackageIndexStore.shared.installedPackagesSnapshot()
         let bestRepoByID = PackageIndexStore.shared.bestRepoByIDSnapshot()
 
+        let holdManager = PackageHoldManager.shared
         var found: [PackageUpdate] = []
         for installedPkg in installed where !installedPkg.isBroken {
+            // Held packages (`apt-mark hold`) are deliberately excluded from
+            // automatic-upgrade lists — matches real `apt list --upgradable`.
+            guard !holdManager.isHeld(installedPkg.id) else { continue }
             guard let candidate = bestRepoByID[installedPkg.id] else { continue }
             guard DpkgVersionComparator.isNewer(candidate.version, than: installedPkg.version) else { continue }
 

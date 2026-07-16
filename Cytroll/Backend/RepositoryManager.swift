@@ -162,4 +162,143 @@ public final class RepositoryManager: ObservableObject {
             }
         }
     }
+
+    /// Removes a source's line (`.list`) or block (`.sources`, Deb822) from
+    /// whichever file under `sources.list.d/` actually contains it — not
+    /// just Cytroll's own `cytroll.list`, since other installers can drop
+    /// their own `.list` files there too. Plain `FileManager` I/O mirrors
+    /// `addSource` above: this directory is writable without going through
+    /// `cytrollhelper`. Never touches the top-level `sources.list` file
+    /// (out of scope — `loadSourcesSync` never reads it either).
+    public func removeSource(_ source: Source) {
+        let normalizedTarget = normalize(source.url)
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            let fm = FileManager.default
+            guard let files = try? fm.contentsOfDirectory(atPath: self.sourcesDir) else { return }
+
+            for file in files {
+                let path = "\(self.sourcesDir)/\(file)"
+                guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
+
+                if file.hasSuffix(".list") {
+                    let keptLines = content.components(separatedBy: .newlines).filter { line in
+                        let trimmed = line.trimmingCharacters(in: .whitespaces)
+                        guard trimmed.hasPrefix("deb ") || trimmed.hasPrefix("deb-src ") else { return true }
+                        let parts = trimmed.split(separator: " ", omittingEmptySubsequences: true)
+                        guard parts.count >= 2 else { return true }
+                        return self.normalize(String(parts[1])) != normalizedTarget
+                    }
+                    self.rewriteOrDelete(path: path, lines: keptLines)
+                } else if file.hasSuffix(".sources") {
+                    let blocks = content.components(separatedBy: "\n\n")
+                    let keptBlocks = blocks.filter { block in
+                        guard let uriLine = block.components(separatedBy: .newlines).first(where: { $0.hasPrefix("URIs: ") }) else { return true }
+                        let url = String(uriLine.dropFirst(6)).trimmingCharacters(in: .whitespaces)
+                        return self.normalize(url) != normalizedTarget
+                    }
+                    self.rewriteOrDelete(path: path, blocks: keptBlocks)
+                }
+            }
+
+            ConsoleManager.shared.log("Removed source: \(source.url). Updating APT...")
+            _ = self.coreBridge.executeAptGet(arguments: ["update", "--allow-insecure-repositories"])
+            PackageIndexStore.shared.refresh {
+                self.loadSourcesSync()
+            }
+        }
+    }
+
+    /// Edits a source's URL in place, wherever its line/block currently
+    /// lives, preserving that file and every other entry in it. Falls back
+    /// to a no-op with a console warning if the old URL can't be found
+    /// (e.g. it was already removed/refreshed away).
+    public func editSource(oldURL: String, newURL: String) {
+        var cleanNew = newURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !cleanNew.hasSuffix("/") { cleanNew += "/" }
+        let normalizedOld = normalize(oldURL)
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            let fm = FileManager.default
+            guard let files = try? fm.contentsOfDirectory(atPath: self.sourcesDir) else { return }
+            var replaced = false
+
+            for file in files {
+                let path = "\(self.sourcesDir)/\(file)"
+                guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
+
+                if file.hasSuffix(".list") {
+                    let lines = content.components(separatedBy: .newlines).map { line -> String in
+                        let trimmed = line.trimmingCharacters(in: .whitespaces)
+                        guard trimmed.hasPrefix("deb ") || trimmed.hasPrefix("deb-src ") else { return line }
+                        let parts = trimmed.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+                        guard parts.count >= 2, self.normalize(parts[1]) == normalizedOld else { return line }
+                        replaced = true
+                        var newParts = parts
+                        newParts[1] = cleanNew
+                        return newParts.joined(separator: " ")
+                    }
+                    if replaced {
+                        try? lines.joined(separator: "\n").write(toFile: path, atomically: true, encoding: .utf8)
+                        break
+                    }
+                } else if file.hasSuffix(".sources") {
+                    let blocks = content.components(separatedBy: "\n\n").map { block -> String in
+                        guard block.contains("URIs: ") else { return block }
+                        let lines = block.components(separatedBy: .newlines).map { line -> String in
+                            guard line.hasPrefix("URIs: ") else { return line }
+                            let url = String(line.dropFirst(6)).trimmingCharacters(in: .whitespaces)
+                            guard self.normalize(url) == normalizedOld else { return line }
+                            replaced = true
+                            return "URIs: \(cleanNew)"
+                        }
+                        return lines.joined(separator: "\n")
+                    }
+                    if replaced {
+                        try? blocks.joined(separator: "\n\n").write(toFile: path, atomically: true, encoding: .utf8)
+                        break
+                    }
+                }
+            }
+
+            guard replaced else {
+                ConsoleManager.shared.log("Could not find source \(oldURL) to edit.")
+                return
+            }
+
+            ConsoleManager.shared.log("Updated source to \(cleanNew). Updating APT...")
+            _ = self.coreBridge.executeAptGet(arguments: ["update", "--allow-insecure-repositories"])
+            PackageIndexStore.shared.refresh {
+                self.loadSourcesSync()
+            }
+        }
+    }
+
+    // MARK: - Source file helpers
+
+    private func normalize(_ url: String) -> String {
+        var s = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !s.hasSuffix("/") { s += "/" }
+        return s.lowercased()
+    }
+
+    private func rewriteOrDelete(path: String, lines: [String]) {
+        let isEmpty = lines.allSatisfy { $0.trimmingCharacters(in: .whitespaces).isEmpty }
+        if isEmpty {
+            try? FileManager.default.removeItem(atPath: path)
+        } else {
+            try? lines.joined(separator: "\n").write(toFile: path, atomically: true, encoding: .utf8)
+        }
+    }
+
+    private func rewriteOrDelete(path: String, blocks: [String]) {
+        let isEmpty = blocks.allSatisfy { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        if isEmpty {
+            try? FileManager.default.removeItem(atPath: path)
+        } else {
+            try? blocks.joined(separator: "\n\n").write(toFile: path, atomically: true, encoding: .utf8)
+        }
+    }
 }

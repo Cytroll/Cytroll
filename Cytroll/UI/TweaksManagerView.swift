@@ -1,15 +1,17 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 public struct TweaksManagerView: View {
     @StateObject private var tweakManager = TweakInjectionManager.shared
     @StateObject private var injectionManager = AppInjectionManager.shared
     @StateObject private var recordStore = InjectionRecordStore.shared
+    @StateObject private var sideloadStore = SideloadedDylibStore.shared
     @StateObject private var themeManager = ThemeManager.shared
 
-    @State private var injectionSheetTweak: TweakInfo?
-    @State private var candidateApps: [InstalledAppInfo] = []
+    @State private var injectionRequest: InjectionRequestContext?
     @State private var isLoadingCandidates = false
 
+    @State private var showingSideloadImporter = false
     @State private var showingInjectionConsole = false
     @State private var lastInjectionErrorMessage: String?
     @State private var showingInjectionError = false
@@ -20,34 +22,34 @@ public struct TweaksManagerView: View {
         ZStack {
             themeManager.backgroundGradient().ignoresSafeArea()
 
-            if tweakManager.installedTweaks.isEmpty && recordStore.records.isEmpty {
-                emptyState
-            } else {
-                List {
-                    tweaksSection
-                    if !recordStore.records.isEmpty {
-                        injectedAppsSection
-                    }
-                    perAppInjectionDisclaimer
+            List {
+                tweaksSection
+                sideloadedSection
+                if !recordStore.records.isEmpty {
+                    injectedAppsSection
                 }
-                .listStyle(.insetGrouped)
-                .scrollContentBackground(.hidden)
+                storageSection
+                perAppInjectionDisclaimer
             }
+            .listStyle(.insetGrouped)
+            .scrollContentBackground(.hidden)
         }
         .navigationTitle("Tweak Injector")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
             tweakManager.refreshTweaks()
             recordStore.refreshNeedsReapplyFlags()
+            injectionManager.recoverStrayTempDirectories()
         }
-        .sheet(item: $injectionSheetTweak) { tweak in
+        .sheet(item: $injectionRequest) { request in
             InjectionTargetPickerSheet(
-                tweak: tweak,
-                candidateApps: candidateApps,
+                tweak: request.tweak,
+                apps: request.apps,
+                headerNote: request.headerNote,
                 isLoading: isLoadingCandidates,
-                onConfirm: { app in
-                    injectionSheetTweak = nil
-                    startInjection(tweak: tweak, app: app)
+                onConfirm: { apps in
+                    injectionRequest = nil
+                    startInjection(tweak: request.tweak, apps: apps)
                 }
             )
         }
@@ -58,6 +60,13 @@ public struct TweaksManagerView: View {
                 title: "Tweak Injection"
             )
         }
+        .fileImporter(
+            isPresented: $showingSideloadImporter,
+            allowedContentTypes: [UTType(filenameExtension: "dylib") ?? .data, .data],
+            allowsMultipleSelection: false
+        ) { result in
+            handleSideloadPicked(result)
+        }
         .alert("Injection Failed", isPresented: $showingInjectionError) {
             Button("OK", role: .cancel) {}
         } message: {
@@ -67,22 +76,13 @@ public struct TweaksManagerView: View {
 
     // MARK: - Sections
 
-    private var emptyState: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "puzzlepiece.extension")
-                .font(.system(size: 50))
-                .foregroundColor(themeManager.currentTheme.textSecondary)
-            Text("No Tweaks Found")
-                .font(.headline)
-                .foregroundColor(themeManager.currentTheme.textPrimary)
-            Text("Install tweaks from the Packages tab.")
-                .font(.subheadline)
-                .foregroundColor(themeManager.currentTheme.textSecondary)
-        }
-    }
-
     private var tweaksSection: some View {
         Section(header: Text("Installed Tweaks").foregroundColor(themeManager.currentTheme.textSecondary)) {
+            if tweakManager.installedTweaks.isEmpty {
+                Text("No apt tweaks found. Install some from the Packages tab, or add a .dylib file directly below.")
+                    .font(.subheadline)
+                    .foregroundColor(themeManager.currentTheme.textSecondary)
+            }
             ForEach(tweakManager.installedTweaks) { tweak in
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
@@ -107,26 +107,72 @@ public struct TweaksManagerView: View {
                         .disabled(tweakManager.isProcessing)
                     }
 
+                    Button(action: { presentInjectionSheet(for: tweak) }) {
+                        HStack {
+                            Image(systemName: "syringe.fill")
+                            Text("Inject Into App…")
+                        }
+                        .font(.caption.bold())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundColor(tweak.isEnabled ? themeManager.currentTheme.accent : themeManager.currentTheme.textSecondary)
+                    .disabled(injectionManager.isProcessing || !tweak.isEnabled)
+
                     if tweak.filterBundleIDs.isEmpty {
-                        Text("No app-injection Filter found in this tweak's plist.")
+                        Text("No app-injection Filter found in this tweak's plist — you'll pick from every installed app instead.")
                             .font(.caption2)
                             .foregroundColor(themeManager.currentTheme.textSecondary)
-                    } else {
-                        Button(action: { presentInjectionSheet(for: tweak) }) {
-                            HStack {
-                                Image(systemName: "syringe.fill")
-                                Text("Inject Into App…")
-                            }
-                            .font(.caption.bold())
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundColor(tweak.isEnabled ? themeManager.currentTheme.accent : themeManager.currentTheme.textSecondary)
-                        .disabled(injectionManager.isProcessing || !tweak.isEnabled)
                     }
                 }
                 .padding(.vertical, 4)
                 .listRowBackground(themeManager.currentTheme.cardBackground.opacity(0.6))
             }
+        }
+    }
+
+    private var sideloadedSection: some View {
+        Section(
+            header: Text("Sideloaded Dylibs").foregroundColor(themeManager.currentTheme.textSecondary),
+            footer: Text("A dylib picked directly from Files, without needing an apt package. You always pick its target app manually.")
+        ) {
+            ForEach(sideloadStore.items) { item in
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(item.name)
+                        .font(.headline)
+                        .foregroundColor(themeManager.currentTheme.textPrimary)
+
+                    Button(action: { presentInjectionSheet(for: item.asTweakInfo) }) {
+                        HStack {
+                            Image(systemName: "syringe.fill")
+                            Text("Inject Into App…")
+                        }
+                        .font(.caption.bold())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundColor(themeManager.currentTheme.accent)
+                    .disabled(injectionManager.isProcessing)
+                }
+                .padding(.vertical, 4)
+                .listRowBackground(themeManager.currentTheme.cardBackground.opacity(0.6))
+                .swipeActions {
+                    Button(role: .destructive) {
+                        sideloadStore.remove(item)
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
+                }
+            }
+
+            Button(action: { showingSideloadImporter = true }) {
+                HStack {
+                    Image(systemName: "plus.circle.fill")
+                    Text("Add .dylib File…")
+                }
+                .font(.subheadline.bold())
+            }
+            .buttonStyle(.plain)
+            .foregroundColor(themeManager.currentTheme.accent)
+            .listRowBackground(themeManager.currentTheme.cardBackground.opacity(0.6))
         }
     }
 
@@ -148,12 +194,12 @@ public struct TweaksManagerView: View {
                     }
 
                     HStack {
-                        // `.failed` means AppInjectionManager's own rollback
-                        // didn't fully complete and the app may be
-                        // inconsistent — force "Restore Original" as the
-                        // only next step rather than offering a re-inject
-                        // that would just be rejected (and could otherwise
-                        // stack a fresh backup on top of an unclear state).
+                        // `.failed` means the atomic swap's own automatic
+                        // recovery didn't fully complete — force "Restore
+                        // Original" as the only next step rather than
+                        // offering a re-inject that would just be
+                        // rejected (and could otherwise stack a fresh
+                        // rebuild on top of an unclear state).
                         if record.status == .needsReapply {
                             Button("Re-inject") {
                                 reapply(record: record)
@@ -171,7 +217,7 @@ public struct TweaksManagerView: View {
                         .disabled(injectionManager.isProcessing)
                     }
                     if record.status == .failed {
-                        Text("A previous injection attempt didn't fully undo itself. Restore this app before trying again.")
+                        Text("A previous attempt didn't fully recover. Restore this app before trying again.")
                             .font(.caption2)
                             .foregroundColor(.red)
                     }
@@ -180,6 +226,19 @@ public struct TweaksManagerView: View {
                 .listRowBackground(themeManager.currentTheme.cardBackground.opacity(0.6))
             }
         }
+    }
+
+    private var storageSection: some View {
+        Section {
+            NavigationLink(destination: InjectionBackupStorageView()) {
+                HStack {
+                    Image(systemName: "internaldrive")
+                    Text("Backup Storage")
+                }
+                .foregroundColor(themeManager.currentTheme.textPrimary)
+            }
+        }
+        .listRowBackground(themeManager.currentTheme.cardBackground.opacity(0.6))
     }
 
     private var perAppInjectionDisclaimer: some View {
@@ -210,29 +269,58 @@ public struct TweaksManagerView: View {
 
     // MARK: - Actions
 
+    /// Tweaks that ship a `Filter -> Bundles` plist only ever offer those
+    /// explicitly-declared apps; everything else (no filter, or a
+    /// sideloaded dylib which never has one) falls back to the full
+    /// installed-apps list, same as real TrollFools' manual target
+    /// picker.
     private func presentInjectionSheet(for tweak: TweakInfo) {
         isLoadingCandidates = true
-        candidateApps = []
-        injectionSheetTweak = tweak
-        tweakManager.candidateApps(for: tweak) { apps in
-            candidateApps = apps
-            isLoadingCandidates = false
-        }
-    }
+        let usesFullList = tweak.filterBundleIDs.isEmpty
+        injectionRequest = InjectionRequestContext(
+            tweak: tweak,
+            apps: [],
+            headerNote: usesFullList ? "No Filter declared — pick any installed app." : "Apps matching \(tweak.name)'s Filter."
+        )
 
-    private func startInjection(tweak: TweakInfo, app: InstalledAppInfo) {
-        ConsoleManager.shared.clear()
-        showingInjectionConsole = true
-        injectionManager.inject(tweak: tweak, into: app) { result in
-            if case .failure(let error) = result {
-                lastInjectionErrorMessage = error.localizedDescription
-                showingInjectionError = true
+        if usesFullList {
+            InstalledAppScanner.shared.scanInstalledApps { apps in
+                injectionRequest?.apps = apps
+                isLoadingCandidates = false
+            }
+        } else {
+            tweakManager.candidateApps(for: tweak) { apps in
+                injectionRequest?.apps = apps
+                isLoadingCandidates = false
             }
         }
     }
 
+    private func startInjection(tweak: TweakInfo, apps: [InstalledAppInfo]) {
+        guard !apps.isEmpty else { return }
+        ConsoleManager.shared.clear()
+        showingInjectionConsole = true
+
+        var failures: [String] = []
+        injectionManager.injectBatch(
+            tweak: tweak,
+            into: apps,
+            progress: { app, result in
+                if case .failure(let error) = result {
+                    failures.append("\(app.displayName): \(error.localizedDescription)")
+                }
+            },
+            completion: {
+                if !failures.isEmpty {
+                    lastInjectionErrorMessage = failures.joined(separator: "\n\n")
+                    showingInjectionError = true
+                }
+            }
+        )
+    }
+
     private func reapply(record: InjectionRecord) {
-        guard let tweak = tweakManager.installedTweaks.first(where: { $0.id == record.tweakID }) else {
+        guard let tweak = resolveTweakInfo(id: record.tweakID) else {
             lastInjectionErrorMessage = "This tweak is no longer installed."
             showingInjectionError = true
             return
@@ -245,25 +333,75 @@ public struct TweaksManagerView: View {
                     showingInjectionError = true
                     return
                 }
-                startInjection(tweak: tweak, app: app)
+                startInjection(tweak: tweak, apps: [app])
+            }
+        }
+    }
+
+    private func resolveTweakInfo(id: String) -> TweakInfo? {
+        if let apt = tweakManager.installedTweaks.first(where: { $0.id == id }) {
+            return apt
+        }
+        return sideloadStore.item(withID: id)?.asTweakInfo
+    }
+
+    private func handleSideloadPicked(_ result: Result<[URL], Error>) {
+        switch result {
+        case .failure(let error):
+            lastInjectionErrorMessage = error.localizedDescription
+            showingInjectionError = true
+        case .success(let urls):
+            guard let url = urls.first else { return }
+            DispatchQueue.global(qos: .userInitiated).async {
+                let outcome = sideloadStore.add(from: url, displayName: nil)
+                DispatchQueue.main.async {
+                    if case .failure(let error) = outcome {
+                        lastInjectionErrorMessage = "Could not add \(url.lastPathComponent): \(error.localizedDescription)"
+                        showingInjectionError = true
+                    }
+                }
             }
         }
     }
 }
 
-/// Sheet listing ONLY the installed apps that match a tweak's `Filter`
-/// (never the full installed-apps list) — per the plan's "opt-in, explicit
-/// target selection" decision. Confirming an app shows a clear warning
-/// before any file is touched.
+/// Identity is the tweak's ID (stable), not a fresh UUID per update — the
+/// sheet is presented immediately with an empty `apps` list while
+/// scanning runs in the background, then updated in place once results
+/// arrive; a fresh identity on that second update would make SwiftUI
+/// treat it as a brand new sheet and flicker.
+private struct InjectionRequestContext: Identifiable {
+    var id: String { tweak.id }
+    let tweak: TweakInfo
+    var apps: [InstalledAppInfo]
+    var headerNote: String
+}
+
+/// Sheet listing candidate apps for a tweak/dylib — either the ones it
+/// explicitly declares support for (`Filter -> Bundles`) or, failing
+/// that, every installed app. Supports selecting multiple apps at once
+/// (batch injection) with one shared confirmation before anything is
+/// touched.
 private struct InjectionTargetPickerSheet: View {
     let tweak: TweakInfo
-    let candidateApps: [InstalledAppInfo]
+    let apps: [InstalledAppInfo]
+    let headerNote: String
     let isLoading: Bool
-    let onConfirm: (InstalledAppInfo) -> Void
+    let onConfirm: ([InstalledAppInfo]) -> Void
 
     @StateObject private var themeManager = ThemeManager.shared
     @Environment(\.dismiss) private var dismiss
-    @State private var appPendingConfirmation: InstalledAppInfo?
+    @State private var selectedBundleIDs: Set<String> = []
+    @State private var showingConfirmation = false
+    @State private var searchText = ""
+
+    private var filteredApps: [InstalledAppInfo] {
+        guard !searchText.isEmpty else { return apps }
+        return apps.filter {
+            $0.displayName.localizedCaseInsensitiveContains(searchText) ||
+            $0.bundleID.localizedCaseInsensitiveContains(searchText)
+        }
+    }
 
     var body: some View {
         NavigationView {
@@ -273,7 +411,7 @@ private struct InjectionTargetPickerSheet: View {
                 if isLoading {
                     ProgressView("Scanning installed apps…")
                         .tint(themeManager.currentTheme.accent)
-                } else if candidateApps.isEmpty {
+                } else if apps.isEmpty {
                     VStack(spacing: 10) {
                         Image(systemName: "questionmark.app")
                             .font(.system(size: 40))
@@ -285,29 +423,50 @@ private struct InjectionTargetPickerSheet: View {
                             .padding(.horizontal)
                     }
                 } else {
-                    List {
-                        Section {
-                            ForEach(candidateApps) { app in
-                                Button(action: { appPendingConfirmation = app }) {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(app.displayName)
-                                            .font(.headline)
-                                            .foregroundColor(themeManager.currentTheme.textPrimary)
-                                        Text("\(app.bundleID) · v\(app.version)")
-                                            .font(.caption2)
-                                            .foregroundColor(themeManager.currentTheme.textSecondary)
+                    VStack(spacing: 0) {
+                        List {
+                            Section {
+                                ForEach(filteredApps) { app in
+                                    Button(action: { toggle(app) }) {
+                                        HStack {
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text(app.displayName)
+                                                    .font(.headline)
+                                                    .foregroundColor(themeManager.currentTheme.textPrimary)
+                                                Text("\(app.bundleID) · v\(app.version)")
+                                                    .font(.caption2)
+                                                    .foregroundColor(themeManager.currentTheme.textSecondary)
+                                            }
+                                            Spacer()
+                                            Image(systemName: selectedBundleIDs.contains(app.bundleID) ? "checkmark.circle.fill" : "circle")
+                                                .foregroundColor(selectedBundleIDs.contains(app.bundleID) ? themeManager.currentTheme.accent : themeManager.currentTheme.textSecondary)
+                                        }
                                     }
+                                    .buttonStyle(.plain)
                                 }
+                            } header: {
+                                Text(headerNote)
+                            } footer: {
+                                Text("Select one or more apps, then confirm below. A full backup is made first for each and restored automatically if anything fails.")
                             }
-                        } header: {
-                            Text("Apps matching \(tweak.name)'s Filter")
-                        } footer: {
-                            Text("Only apps this tweak explicitly declares support for are shown.")
+                            .listRowBackground(themeManager.currentTheme.cardBackground.opacity(0.6))
                         }
-                        .listRowBackground(themeManager.currentTheme.cardBackground.opacity(0.6))
+                        .listStyle(.insetGrouped)
+                        .scrollContentBackground(.hidden)
+                        .searchable(text: $searchText, prompt: "Search apps")
+
+                        Button(action: { showingConfirmation = true }) {
+                            Text(selectedBundleIDs.isEmpty ? "Select at Least One App" : "Inject Into \(selectedBundleIDs.count) App\(selectedBundleIDs.count == 1 ? "" : "s")")
+                                .font(.headline)
+                                .frame(maxWidth: .infinity)
+                                .padding()
+                        }
+                        .background(selectedBundleIDs.isEmpty ? themeManager.currentTheme.textSecondary.opacity(0.3) : themeManager.currentTheme.accent)
+                        .foregroundColor(.white)
+                        .cornerRadius(12)
+                        .disabled(selectedBundleIDs.isEmpty)
+                        .padding()
                     }
-                    .listStyle(.insetGrouped)
-                    .scrollContentBackground(.hidden)
                 }
             }
             .navigationTitle("Inject \(tweak.name)")
@@ -318,21 +477,24 @@ private struct InjectionTargetPickerSheet: View {
                 }
             }
             .alert(
-                "Inject Into \(appPendingConfirmation?.displayName ?? "")?",
-                isPresented: Binding(
-                    get: { appPendingConfirmation != nil },
-                    set: { if !$0 { appPendingConfirmation = nil } }
-                )
+                "Inject Into \(selectedBundleIDs.count) App\(selectedBundleIDs.count == 1 ? "" : "s")?",
+                isPresented: $showingConfirmation
             ) {
-                Button("Cancel", role: .cancel) { appPendingConfirmation = nil }
+                Button("Cancel", role: .cancel) {}
                 Button("Inject", role: .destructive) {
-                    if let app = appPendingConfirmation {
-                        onConfirm(app)
-                    }
+                    onConfirm(apps.filter { selectedBundleIDs.contains($0.bundleID) })
                 }
             } message: {
-                Text("This patches \(appPendingConfirmation?.displayName ?? "the app")'s executable to load this tweak. A full backup is made first and restored automatically if anything fails. Works only on third-party apps, breaks silently on the app's next update, and needs the app restarted (or the device resprung) to take effect.")
+                Text("This patches each selected app's executable to load \(tweak.name). A full backup is made first per app and restored automatically if anything fails. Works only on third-party apps, breaks silently on each app's next update, and needs the app restarted (or the device resprung) to take effect.")
             }
+        }
+    }
+
+    private func toggle(_ app: InstalledAppInfo) {
+        if selectedBundleIDs.contains(app.bundleID) {
+            selectedBundleIDs.remove(app.bundleID)
+        } else {
+            selectedBundleIDs.insert(app.bundleID)
         }
     }
 }

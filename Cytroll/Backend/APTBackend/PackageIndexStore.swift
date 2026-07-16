@@ -109,7 +109,15 @@ public final class PackageIndexStore: ObservableObject {
             var mergedByID = bestRepoByID
             for installedPkg in installed {
                 var pkg = installedPkg
-                if let repoPkg = bestRepoByID[pkg.id] { pkg.sourceURL = repoPkg.sourceURL }
+                // `dpkg status` never carries Size:/Depiction: — backfill
+                // whatever the best-known repo listing has so Package
+                // Details/depiction still work for already-installed packages.
+                if let repoPkg = bestRepoByID[pkg.id] {
+                    pkg.sourceURL = repoPkg.sourceURL
+                    pkg.downloadSizeBytes = repoPkg.downloadSizeBytes
+                    if pkg.homepageURL == nil { pkg.homepageURL = repoPkg.homepageURL }
+                    if pkg.depictionURL == nil { pkg.depictionURL = repoPkg.depictionURL }
+                }
                 installedByID[pkg.id] = pkg
                 mergedByID[pkg.id] = pkg
             }

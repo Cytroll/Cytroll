@@ -91,6 +91,15 @@ public final class QueueManager: ObservableObject {
                 TweakInjectionManager.shared.refreshTweaks()
             }
 
+            // Record every queued item in the real activity log — `self.queue`
+            // still holds the pre-transaction items here (it's only cleared
+            // in the delayed block below), so this always reflects exactly
+            // what was actually attempted.
+            for pkg in self.queue {
+                guard let action = pkg.action else { continue }
+                ActivityLogManager.shared.log(action: action.rawValue, packageName: pkg.name, packageID: pkg.id, success: success)
+            }
+
             // Delay clearing the UI state so the user can see the final status
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
                 if success {

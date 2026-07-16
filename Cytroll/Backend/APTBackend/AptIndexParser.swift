@@ -52,7 +52,11 @@ public final class AptIndexParser {
                         sourceURL: sourceURLGuess,
                         section: fields["Section"] ?? "Unknown",
                         dependsGroups: ControlFieldParser.parseDependsGroups(fields["Depends"]),
-                        conflicts: ControlFieldParser.parseFlatPackageList(fields["Conflicts"])
+                        conflicts: ControlFieldParser.parseFlatPackageList(fields["Conflicts"]),
+                        installedSizeKB: fields["Installed-Size"].flatMap { Int($0.trimmingCharacters(in: .whitespaces)) },
+                        downloadSizeBytes: fields["Size"].flatMap { Int64($0.trimmingCharacters(in: .whitespaces)) },
+                        homepageURL: fields["Homepage"].flatMap { $0.isEmpty ? nil : $0 },
+                        depictionURL: (fields["Depiction"] ?? fields["SileoDepiction"]).flatMap { $0.isEmpty ? nil : $0 }
                     )
                     repoPackages.append(pkg)
                 }

@@ -27,13 +27,18 @@ public final class TransactionManager: ObservableObject {
             var upgrades = [String]()
             var reinstalls = [String]()
             
-            // Distribute queue items into operations
+            // Distribute queue items into operations. When a package carries
+            // a `pinnedVersion` (set from Package Details' "Other Versions"
+            // picker), request that *exact* version via apt's native
+            // `name=version` syntax instead of whatever apt would otherwise
+            // pick as the candidate.
             for pkg in queue {
+                let target = pkg.pinnedVersion.map { "\(pkg.id)=\($0)" } ?? pkg.id
                 switch pkg.action {
-                case .install: installs.append(pkg.id)
+                case .install: installs.append(target)
                 case .remove: removes.append(pkg.id)
-                case .upgrade: upgrades.append(pkg.id)
-                case .reinstall: reinstalls.append(pkg.id)
+                case .upgrade: upgrades.append(target)
+                case .reinstall: reinstalls.append(target)
                 case .none: break
                 }
             }

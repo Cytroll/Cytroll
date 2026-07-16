@@ -5,6 +5,7 @@ public struct SettingsView: View {
     @StateObject private var themeManager = ThemeManager.shared
     @StateObject private var diagnostics = DiagnosticsManager.shared
     @StateObject private var queueManager = QueueManager.shared
+    @StateObject private var pmSettings = PackageManagerSettings.shared
     @State private var tweaksEnabled: Bool = JailbreakUtilities.shared.areTweaksEnabled()
 
     /// Diagnostics/removal and a queued install/remove transaction both
@@ -71,6 +72,38 @@ public struct SettingsView: View {
                     .listRowBackground(themeManager.currentTheme.cardBackground.opacity(0.6))
                     .foregroundColor(themeManager.currentTheme.textPrimary)
                     
+                    // MARK: Package Manager
+                    Section(header: Text("Package Manager").foregroundColor(themeManager.currentTheme.textSecondary)) {
+                        Toggle(isOn: $pmSettings.filterIncompatiblePackages) {
+                            HStack {
+                                Image(systemName: "checkmark.shield.fill")
+                                    .foregroundColor(themeManager.currentTheme.accent)
+                                Text("Filter Incompatible Packages")
+                                    .foregroundColor(themeManager.currentTheme.textPrimary)
+                            }
+                        }
+                        .tint(themeManager.currentTheme.accent)
+
+                        Text("Hides packages whose Architecture targets a different platform (watchOS, macOS, etc.) from the Packages tab.")
+                            .font(.caption2)
+                            .foregroundColor(themeManager.currentTheme.textSecondary)
+
+                        Toggle(isOn: $pmSettings.showAllVersions) {
+                            HStack {
+                                Image(systemName: "clock.arrow.circlepath")
+                                    .foregroundColor(themeManager.currentTheme.accent)
+                                Text("Expand Other Versions by Default")
+                                    .foregroundColor(themeManager.currentTheme.textPrimary)
+                            }
+                        }
+                        .tint(themeManager.currentTheme.accent)
+
+                        Text("Auto-expands the \"Other Versions Available\" list on a package's Details page instead of hiding it behind a disclosure.")
+                            .font(.caption2)
+                            .foregroundColor(themeManager.currentTheme.textSecondary)
+                    }
+                    .listRowBackground(themeManager.currentTheme.cardBackground.opacity(0.6))
+
                     // MARK: Tweak Management
                     Section(header: Text("Tweak Management").foregroundColor(themeManager.currentTheme.textSecondary)) {
                         Toggle(isOn: $tweaksEnabled) {

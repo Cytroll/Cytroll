@@ -36,6 +36,7 @@ public enum RootlessPaths {
 
     public static var aptGet: String { jb("usr", "bin", "apt-get") }
     public static var apt: String { jb("usr", "bin", "apt") }
+    public static var aptMark: String { jb("usr", "bin", "apt-mark") }
     public static var dpkg: String { jb("usr", "bin", "dpkg") }
 
     public static var aptListsDir: String { jb("var", "lib", "apt", "lists") }
@@ -68,6 +69,15 @@ public enum RootlessPaths {
     public static var cytrollStateDir: String { jb("var", "cytroll") }
     public static var injectionBackupsDir: String { jb("var", "cytroll", "backups") }
     public static var injectionRecordsFile: String { jb("var", "cytroll", "injections.json") }
+    /// One shared "pristine" backup per injected app (keyed by bundle ID),
+    /// not one per tweak — see `AppPristineBackupStore`.
+    public static var pristineBackupsFile: String { jb("var", "cytroll", "pristine_backups.json") }
+    /// User-picked `.dylib` files not installed via apt — see
+    /// `SideloadedDylibStore`.
+    public static var sideloadedDylibsDir: String { jb("var", "cytroll", "sideloaded") }
+    public static var sideloadedDylibsFile: String { jb("var", "cytroll", "sideloaded.json") }
+    /// Persisted real Home tab activity log — see `ActivityLogManager`.
+    public static var activityLogFile: String { jb("var", "cytroll", "activity.json") }
 
     // MARK: - Bootstrap
 

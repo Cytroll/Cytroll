@@ -13,6 +13,16 @@ public struct PackagesTabView: View {
                 themeManager.backgroundGradient().ignoresSafeArea()
                 
                 List {
+                    NavigationLink(destination: CategoriesView()) {
+                        HStack {
+                            Image(systemName: "square.grid.2x2.fill")
+                                .foregroundColor(themeManager.currentTheme.accent)
+                            Text("Browse by Category")
+                                .foregroundColor(themeManager.currentTheme.textPrimary)
+                        }
+                    }
+                    .listRowBackground(themeManager.currentTheme.cardBackground.opacity(0.6))
+
                     ForEach(viewModel.filteredPackages) { pkg in
                         PackageRow(package: pkg, theme: themeManager.currentTheme) { action in
                             // Adding to queue with animation triggers the ContentView's Floating Queue Bar dynamically
@@ -42,49 +52,62 @@ public struct PackageRow: View {
     let package: Package
     let theme: ThemeProtocol
     let onQueueAction: (QueueAction) -> Void
-    
+
+    @StateObject private var holdManager = PackageHoldManager.shared
+
     public var body: some View {
         HStack(spacing: 16) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(theme.accent.opacity(0.15))
-                    .frame(width: 48, height: 48)
-                Image(systemName: "shippingbox.fill")
-                    .foregroundColor(theme.accent)
-                    .font(.title2)
-            }
-            
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    Text(package.name)
-                        .font(.headline)
-                        .foregroundColor(theme.textPrimary)
-                    
-                    if package.isBroken {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundColor(.orange)
+            NavigationLink(destination: PackageDetailView(package: package)) {
+                HStack(spacing: 16) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 12)
+                            .fill(theme.accent.opacity(0.15))
+                            .frame(width: 48, height: 48)
+                        Image(systemName: "shippingbox.fill")
+                            .foregroundColor(theme.accent)
+                            .font(.title2)
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 6) {
+                            Text(package.name)
+                                .font(.headline)
+                                .foregroundColor(theme.textPrimary)
+
+                            if package.isBroken {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundColor(.orange)
+                                    .font(.caption2)
+                            } else if package.isInstalled {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundColor(.green)
+                                    .font(.caption2)
+                            }
+                            if holdManager.isHeld(package.id) {
+                                Image(systemName: "lock.fill")
+                                    .foregroundColor(.orange)
+                                    .font(.caption2)
+                            }
+                        }
+
+                        Text("\(package.version) • \(package.author)")
+                            .font(.caption)
+                            .foregroundColor(theme.textSecondary)
+                        Text(package.description)
                             .font(.caption2)
-                    } else if package.isInstalled {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundColor(.green)
-                            .font(.caption2)
+                            .foregroundColor(theme.textSecondary.opacity(0.8))
+                            .lineLimit(1)
+
+                        if let source = package.sourceURL {
+                            Text(source)
+                                .font(.system(size: 10, weight: .medium, design: .rounded))
+                                .foregroundColor(theme.accent.opacity(0.8))
+                        }
                     }
                 }
-                
-                Text("\(package.version) • \(package.author)")
-                    .font(.caption)
-                    .foregroundColor(theme.textSecondary)
-                Text(package.description)
-                    .font(.caption2)
-                    .foregroundColor(theme.textSecondary.opacity(0.8))
-                    .lineLimit(1)
-                
-                if let source = package.sourceURL {
-                    Text(source)
-                        .font(.system(size: 10, weight: .medium, design: .rounded))
-                        .foregroundColor(theme.accent.opacity(0.8))
-                }
             }
+            .buttonStyle(.plain)
+
             Spacer()
             
             Menu {

@@ -6,6 +6,9 @@ public struct SourcesView: View {
     
     @State private var showingAddSource = false
     @State private var newSourceURL = "https://"
+
+    @State private var editingSource: Source?
+    @State private var editedURL = ""
     
     public init() {}
     
@@ -45,6 +48,20 @@ public struct SourcesView: View {
                         }
                         .padding(.vertical, 4)
                         .listRowBackground(themeManager.currentTheme.cardBackground.opacity(0.6))
+                        .swipeActions(edge: .trailing) {
+                            Button(role: .destructive) {
+                                repoManager.removeSource(source)
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                            Button {
+                                editedURL = source.url
+                                editingSource = source
+                            } label: {
+                                Label("Edit", systemImage: "pencil")
+                            }
+                            .tint(themeManager.currentTheme.accent)
+                        }
                     }
                 }
                 .listStyle(.insetGrouped)
@@ -79,6 +96,24 @@ public struct SourcesView: View {
                 })
             } message: {
                 Text("Enter the APT repository URL.")
+            }
+            .alert("Edit Source", isPresented: Binding(
+                get: { editingSource != nil },
+                set: { if !$0 { editingSource = nil } }
+            )) {
+                TextField("URL", text: $editedURL)
+                    .keyboardType(.URL)
+                Button("Save", action: {
+                    if let source = editingSource {
+                        repoManager.editSource(oldURL: source.url, newURL: editedURL)
+                    }
+                    editingSource = nil
+                })
+                Button("Cancel", role: .cancel, action: {
+                    editingSource = nil
+                })
+            } message: {
+                Text("Update the APT repository URL.")
             }
         }
     }

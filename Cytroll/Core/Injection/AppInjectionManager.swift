@@ -10,11 +10,10 @@ public enum InjectionError: Error, LocalizedError {
     case insertDylibFailed
     case signingFailed
     case verificationFailed
+    case swapFailed
     case rollbackIncomplete
     case needsRestoreFirst
     case recordMissing
-    case restoreCopyFailed
-    case restoreVerificationFailed
 
     public var errorDescription: String? {
         switch self {
@@ -23,25 +22,29 @@ public enum InjectionError: Error, LocalizedError {
         case .toolMissing(let name): return "Required bundled tool missing: \(name)."
         case .backupFailed(let reason): return "Backup failed — no changes were made. (\(reason))"
         case .backupVerificationFailed: return "Backup verification failed — aborted before touching the app."
-        case .dylibCopyFailed: return "Could not copy the dylib into the app — rolled back to backup."
-        case .insertDylibFailed: return "Failed to patch the app's executable — rolled back to backup."
-        case .signingFailed: return "Failed to re-sign the patched app — rolled back to backup."
-        case .verificationFailed: return "Post-injection verification failed — rolled back to backup."
-        case .rollbackIncomplete: return "Injection failed AND the automatic rollback did not fully complete — the app may be in an inconsistent state. Use \"Restore Original\" for this app in Injected Apps before trying anything else."
-        case .needsRestoreFirst: return "A previous attempt on this app didn't fully roll back. Tap \"Restore Original\" for it in Injected Apps before trying again."
-        case .recordMissing: return "No injection record found for this app/tweak."
-        case .restoreCopyFailed: return "Restore failed while copying the backup back — original app was left untouched."
-        case .restoreVerificationFailed: return "Restore verification failed — original app was left untouched."
+        case .dylibCopyFailed: return "Could not stage the dylib — nothing was touched."
+        case .insertDylibFailed: return "Failed to patch a working copy of the app's executable — the live app was never touched."
+        case .signingFailed: return "Failed to re-sign the patched working copy — the live app was never touched."
+        case .verificationFailed: return "Post-patch verification failed on the working copy — the live app was never touched."
+        case .swapFailed: return "Could not swap the rebuilt app into place — the original app was left exactly as it was."
+        case .rollbackIncomplete: return "The app may be in an inconsistent state after a failed swap. Tap \"Restore Original\" for it in Injected Apps, or relaunch Cytroll to trigger automatic recovery."
+        case .needsRestoreFirst: return "A previous attempt on this app didn't fully recover. Tap \"Restore Original\" for it in Injected Apps before trying again."
+        case .recordMissing: return "No pristine backup found for this app/tweak."
         }
     }
 }
 
-/// TrollFools-style per-app tweak injection: patches ONE third-party app's
-/// Mach-O executable to load a tweak's dylib, re-signs it with `ldid`, and
-/// keeps a full backup for atomic rollback. Every step that can fail is
-/// checked; any failure after the (mandatory, verified) backup rolls the
-/// touched files back immediately — the target app is never left in a
-/// half-patched state.
+/// TrollFools-style per-app tweak injection: patches a third-party app's
+/// Mach-O executable to load one or more tweaks' dylibs, re-signs it with
+/// `ldid`, and never touches the live app in place.
+///
+/// Every inject/restore/re-inject is really "rebuild the whole app from
+/// its one pristine backup plus whatever full set of tweaks should now be
+/// active, entirely inside a temp copy, verify that copy, and only then
+/// atomically swap it in." This is what makes multiple tweaks safely
+/// stackable on one app — restoring tweak A always reapplies tweak B
+/// fresh as part of the same rebuild, so it can never be silently wiped
+/// out by an unrelated operation on a different tweak.
 public final class AppInjectionManager: ObservableObject {
     public static let shared = AppInjectionManager()
 
@@ -50,46 +53,58 @@ public final class AppInjectionManager: ObservableObject {
     private let coreBridge = CytrollCoreBridge.shared
     private let console = ConsoleManager.shared
     private let recordStore = InjectionRecordStore.shared
+    private let backupStore = AppPristineBackupStore.shared
     private let fm = FileManager.default
 
-    private static let timestampFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "yyyyMMdd-HHmmss"
-        return f
-    }()
-
-    private init() {}
+    private init() {
+        recoverStrayTempDirectories()
+    }
 
     // MARK: - Inject
 
     public func inject(tweak: TweakInfo, into app: InstalledAppInfo, completion: @escaping (Result<InjectionRecord, InjectionError>) -> Void) {
-        guard !isProcessing else { return }
+        injectBatch(tweak: tweak, into: [app], progress: { _, result in completion(result) }, completion: {})
+    }
+
+    /// Injects the same tweak into several apps as one operation. Safe to
+    /// do sequentially — each app has its own independent pristine backup
+    /// and container path, so one app's rebuild can never interfere with
+    /// another's.
+    public func injectBatch(
+        tweak: TweakInfo,
+        into apps: [InstalledAppInfo],
+        progress: @escaping (InstalledAppInfo, Result<InjectionRecord, InjectionError>) -> Void,
+        completion: @escaping () -> Void
+    ) {
+        guard !isProcessing, !apps.isEmpty else { return }
         isProcessing = true
-        console.log("Starting injection: \(tweak.name) -> \(app.displayName)")
+        console.log("Starting injection: \(tweak.name) -> \(apps.count) app(s)")
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
-            let result = self.performInject(tweak: tweak, app: app)
+
+            for app in apps {
+                let result = self.performInject(tweak: tweak, app: app)
+                DispatchQueue.main.async {
+                    switch result {
+                    case .success(let record):
+                        self.console.log("Injection succeeded: \(tweak.name) -> \(app.displayName).")
+                        self.recordStore.upsert(record)
+                        self.refreshAppAfterChange(bundleID: app.bundleID, displayName: app.displayName)
+                    case .failure(let error):
+                        self.console.log("Injection FAILED for \(app.displayName): \(error.localizedDescription)")
+                        if case .rollbackIncomplete = error {
+                            self.markAppRecordsFailed(bundleID: app.bundleID)
+                        }
+                    }
+                    progress(app, result)
+                }
+            }
 
             DispatchQueue.main.async {
                 self.isProcessing = false
-                switch result {
-                case .success(let record):
-                    self.console.log("Injection succeeded: \(tweak.name) -> \(app.displayName). Restart the app (uicache/respring recommended) for it to take effect.")
-                    let previous = self.recordStore.records.first(where: { $0.id == record.id })
-                    self.recordStore.upsert(record)
-                    completion(.success(record))
-                    // A successful (re-)injection makes any older backup for
-                    // this exact app/tweak pair redundant (stale app version,
-                    // or a backup kept around from a previous failed attempt
-                    // that's no longer needed now that it's been superseded).
-                    if let previous = previous, previous.backupPath != record.backupPath, !previous.backupPath.isEmpty {
-                        self.deleteBackupDir(forBackupAppPath: previous.backupPath)
-                    }
-                case .failure(let error):
-                    self.console.log("Injection FAILED: \(error.localizedDescription)")
-                    completion(.failure(error))
-                }
+                self.console.log("Injection batch finished. Restart the affected app(s) (uicache/respring recommended) for changes to take effect.")
+                completion()
             }
         }
     }
@@ -97,161 +112,50 @@ public final class AppInjectionManager: ObservableObject {
     private func performInject(tweak: TweakInfo, app: InstalledAppInfo) -> Result<InjectionRecord, InjectionError> {
         guard fm.fileExists(atPath: app.bundlePath) else { return .failure(.appNotFound) }
         guard fm.fileExists(atPath: tweak.dylibPath) else { return .failure(.dylibNotFound) }
-        // A `.failed` record means a previous attempt's automatic rollback
-        // didn't fully complete — refuse to pile a fresh backup/attempt on
-        // top of a possibly-inconsistent app. Force an explicit restore
-        // first so we never lose track of the one backup known to predate
-        // any modification.
-        if let existing = recordStore.records.first(where: { $0.tweakID == tweak.id && $0.bundleID == app.bundleID }), existing.status == .failed {
+
+        // A `.failed` record means a previous rebuild's atomic swap didn't
+        // fully recover — refuse to start another rebuild on top of a
+        // possibly-inconsistent app. Force an explicit restore first.
+        if recordStore.records(forBundleID: app.bundleID).contains(where: { $0.status == .failed }) {
             return .failure(.needsRestoreFirst)
         }
-        guard let insertDylibPath = BootstrapConfig.bundledToolPath("insert_dylib") else {
-            return .failure(.toolMissing("insert_dylib"))
-        }
-        // Prefer the bundled ldid (always present, same one used for
-        // bootstrap signing); fall back to the rootless-prefix one apt
-        // installed, mirroring BootstrapManager's own fallback pattern.
-        let ldidCandidate = BootstrapConfig.bundledToolPath("ldid") ?? RootlessPaths.ldid
-        guard fm.fileExists(atPath: ldidCandidate) else {
-            return .failure(.toolMissing("ldid"))
-        }
-        let ldidPath = ldidCandidate
 
-        // 1. Mandatory full backup, verified before any modification happens.
-        let timestamp = Self.timestampFormatter.string(from: Date())
-        let appBundleName = (app.bundlePath as NSString).lastPathComponent
-        let backupDir = RootlessPaths.injectionBackupsDir + "/" + sanitize(app.bundleID) + "/" + timestamp
-        let backupAppPath = backupDir + "/" + appBundleName
-
-        console.log("Backing up \(app.displayName)...")
-        _ = coreBridge.executeCommand(executable: "/bin/mkdir", arguments: ["-p", backupDir])
-        let backupOK = coreBridge.executeCommand(executable: "/bin/cp", arguments: ["-Rp", app.bundlePath, backupAppPath])
-
-        guard backupOK else {
-            _ = coreBridge.executeCommand(executable: "/bin/rm", arguments: ["-rf", backupDir])
-            return .failure(.backupFailed("cp exited with a non-zero status"))
-        }
-
-        guard verifyMirror(source: app.bundlePath, mirror: backupAppPath) else {
-            console.log("Backup does not mirror the original app (file count/size mismatch) — deleting partial backup, aborting.")
-            _ = coreBridge.executeCommand(executable: "/bin/rm", arguments: ["-rf", backupDir])
-            return .failure(.backupVerificationFailed)
-        }
-
-        // 2. Extract original entitlements from the verified backup (read-only,
-        // the live app hasn't been touched yet at this point).
-        let backupExecutablePath = backupAppPath + "/" + (app.executablePath as NSString).lastPathComponent
-        let entitlementsPath = backupDir + "/entitlements.plist"
-        let (entitlementsOK, entitlementsXML) = coreBridge.executeCommandCapturingOutput(executable: ldidPath, arguments: ["-e", backupExecutablePath])
-        let hasEntitlements = entitlementsOK && entitlementsXML.contains("<?xml")
-        if hasEntitlements {
-            try? entitlementsXML.write(toFile: entitlementsPath, atomically: true, encoding: .utf8)
-        }
-
-        // From here on we've verified a good backup exists — any failure
-        // rolls back just the files this pipeline touches.
-        let frameworksDir = app.bundlePath + "/Frameworks"
-        let dylibFileName = "CytrollTweak_\(sanitize(tweak.id)).dylib"
-        let dylibDestPath = frameworksDir + "/" + dylibFileName
-
-        // Returns true only if BOTH the executable was restored AND the
-        // injected dylib was removed — a partial result means the app may
-        // be left inconsistent and must be surfaced, never silently dropped.
-        func rollback() -> Bool {
-            console.log("Rolling back to backup...")
-            let tmp = app.executablePath + ".cytroll_rollback_tmp"
-            _ = coreBridge.executeCommand(executable: "/bin/rm", arguments: ["-f", tmp])
-            let executableRestored = coreBridge.executeCommand(executable: "/bin/cp", arguments: ["-p", backupExecutablePath, tmp])
-                && coreBridge.executeCommand(executable: "/bin/mv", arguments: [tmp, app.executablePath])
-            let dylibRemoved = coreBridge.executeCommand(executable: "/bin/rm", arguments: ["-f", dylibDestPath])
-            return executableRestored && dylibRemoved
-        }
-
-        // Shared handling for every failure that happens once a verified
-        // backup exists: roll back, then either clean up the now-unneeded
-        // backup (rollback fully succeeded — app is back to normal, nothing
-        // to track) or persist a `.failed` record pointing at the still-good
-        // backup (rollback didn't fully succeed — app may be inconsistent,
-        // never lose the one path back to a known-good state).
-        func fail(_ error: InjectionError) -> Result<InjectionRecord, InjectionError> {
-            if rollback() {
-                _ = coreBridge.executeCommand(executable: "/bin/rm", arguments: ["-rf", backupDir])
-                return .failure(error)
+        var desiredByID: [String: TweakInfo] = [:]
+        for record in recordStore.records(forBundleID: app.bundleID) {
+            if let info = resolveTweakInfo(id: record.tweakID) {
+                desiredByID[info.id] = info
             }
+        }
+        desiredByID[tweak.id] = tweak
+        let desiredTweaks = Array(desiredByID.values)
 
-            console.log("WARNING: rollback did not fully complete for \(app.displayName) — preserving backup at \(backupAppPath) for manual restore.")
-            var failedRecord = InjectionRecord(
+        switch rebuild(bundleID: app.bundleID, desiredTweaks: desiredTweaks) {
+        case .failure(let error):
+            return .failure(error)
+        case .success(let pristine):
+            syncSiblingRecords(bundleID: app.bundleID, excludingTweakID: tweak.id, newVersion: pristine.appVersionAtBackup)
+            let record = InjectionRecord(
                 tweakID: tweak.id,
                 tweakName: tweak.name,
                 bundleID: app.bundleID,
                 appDisplayName: app.displayName,
-                backupPath: backupAppPath,
-                injectedAppVersion: app.version,
-                dylibDestinationPath: dylibDestPath
+                injectedAppVersion: pristine.appVersionAtBackup,
+                dylibDestinationPath: app.bundlePath + "/Frameworks/" + dylibFileName(for: tweak)
             )
-            failedRecord.status = .failed
-            recordStore.upsert(failedRecord)
-            return .failure(.rollbackIncomplete)
+            return .success(record)
         }
-
-        // 3. Copy the tweak's dylib into the target bundle's Frameworks/.
-        _ = coreBridge.executeCommand(executable: "/bin/mkdir", arguments: ["-p", frameworksDir])
-        guard coreBridge.executeCommand(executable: "/bin/cp", arguments: ["-p", tweak.dylibPath, dylibDestPath]) else {
-            return fail(.dylibCopyFailed)
-        }
-        // Ad-hoc sign the injected dylib too (matches real TrollFools behavior;
-        // harmless best-effort — the exploit class TrollStore relies on trusts
-        // ad-hoc/fake signatures system-wide, but this keeps things consistent
-        // on stricter bypass variants).
-        _ = coreBridge.executeCommand(executable: ldidPath, arguments: ["-S", dylibDestPath])
-
-        // 4. Patch the main executable's load commands.
-        let loadCommandString = "@executable_path/Frameworks/\(dylibFileName)"
-        let insertArgs = ["--inplace", "--weak", "--strip-codesig", "--all-yes", "--overwrite", loadCommandString, app.executablePath]
-        guard coreBridge.executeCommand(executable: insertDylibPath, arguments: insertArgs) else {
-            return fail(.insertDylibFailed)
-        }
-
-        // 5. Re-sign the patched executable, reapplying its original entitlements.
-        let signArgs: [String] = (hasEntitlements && fm.fileExists(atPath: entitlementsPath))
-            ? ["-S\(entitlementsPath)", app.executablePath]
-            : ["-S", app.executablePath]
-        guard coreBridge.executeCommand(executable: ldidPath, arguments: signArgs) else {
-            return fail(.signingFailed)
-        }
-
-        // 6. Basic post-injection verification: the executable must still be
-        // present and carry a readable signature blob after re-signing.
-        let (verifyOK, _) = coreBridge.executeCommandCapturingOutput(executable: ldidPath, arguments: ["-e", app.executablePath])
-        guard verifyOK, fm.fileExists(atPath: app.executablePath) else {
-            return fail(.verificationFailed)
-        }
-
-        // 8. Persist the injection record.
-        let record = InjectionRecord(
-            tweakID: tweak.id,
-            tweakName: tweak.name,
-            bundleID: app.bundleID,
-            appDisplayName: app.displayName,
-            backupPath: backupAppPath,
-            injectedAppVersion: app.version,
-            dylibDestinationPath: dylibDestPath
-        )
-        return .success(record)
     }
 
     // MARK: - Restore
 
-    /// Restores the target app to the exact state it was in before
-    /// injection, from the record's backup. Copies the backup to a
-    /// sibling temp path first and verifies it *before* touching the live
-    /// app — the live app is only ever removed once a verified restore
-    /// payload is sitting right next to it, ready for an (almost
-    /// instantaneous, same-volume) rename into place.
+    /// Removes ONE tweak from an app, rebuilding it with every other
+    /// currently-active tweak still applied. Only once the LAST tweak
+    /// comes off does the app go back to its untouched pristine state and
+    /// its shared backup get freed.
     public func restore(_ record: InjectionRecord, completion: @escaping (Result<Void, InjectionError>) -> Void) {
         guard !isProcessing else { return }
         isProcessing = true
-        console.log("Restoring \(record.appDisplayName) to its pre-injection backup...")
+        console.log("Restoring \(record.tweakName) from \(record.appDisplayName)...")
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
@@ -261,14 +165,15 @@ public final class AppInjectionManager: ObservableObject {
                 self.isProcessing = false
                 switch result {
                 case .success:
-                    self.console.log("Restored \(record.appDisplayName) to its original state.")
+                    self.console.log("Restored \(record.tweakName) from \(record.appDisplayName).")
                     self.recordStore.remove(id: record.id)
                     completion(.success(()))
-                    // The app now matches the backup again — it's served its
-                    // purpose, free the space instead of leaving it forever.
-                    self.deleteBackupDir(forBackupAppPath: record.backupPath)
+                    self.refreshAppAfterChange(bundleID: record.bundleID, displayName: record.appDisplayName)
                 case .failure(let error):
                     self.console.log("Restore FAILED for \(record.appDisplayName): \(error.localizedDescription)")
+                    if case .rollbackIncomplete = error {
+                        self.markAppRecordsFailed(bundleID: record.bundleID)
+                    }
                     completion(.failure(error))
                 }
             }
@@ -276,54 +181,25 @@ public final class AppInjectionManager: ObservableObject {
     }
 
     private func performRestore(_ record: InjectionRecord) -> Result<Void, InjectionError> {
-        guard let app = InstalledAppScanner.shared.app(withBundleID: record.bundleID) else {
-            return .failure(.appNotFound)
+        // `rebuild(_:_:)` does its own `InstalledAppScanner` lookup (and
+        // returns `.appNotFound` itself) — avoid scanning every installed
+        // app's Info.plist twice per restore just to check the same thing.
+        let remaining = recordStore.records(forBundleID: record.bundleID)
+            .filter { $0.tweakID != record.tweakID && $0.status != .failed }
+            .compactMap { resolveTweakInfo(id: $0.tweakID) }
+
+        switch rebuild(bundleID: record.bundleID, desiredTweaks: remaining) {
+        case .failure(let error):
+            return .failure(error)
+        case .success(let pristine):
+            if remaining.isEmpty {
+                backupStore.remove(bundleID: record.bundleID)
+                deleteBackupDir(forBackupAppPath: pristine.backupAppPath)
+            } else {
+                syncSiblingRecords(bundleID: record.bundleID, excludingTweakID: record.tweakID, newVersion: pristine.appVersionAtBackup)
+            }
+            return .success(())
         }
-        guard fm.fileExists(atPath: record.backupPath) else {
-            return .failure(.recordMissing)
-        }
-
-        let tempRestorePath = app.bundlePath + ".cytroll_restore_tmp"
-        _ = coreBridge.executeCommand(executable: "/bin/rm", arguments: ["-rf", tempRestorePath])
-
-        guard coreBridge.executeCommand(executable: "/bin/cp", arguments: ["-Rp", record.backupPath, tempRestorePath]) else {
-            _ = coreBridge.executeCommand(executable: "/bin/rm", arguments: ["-rf", tempRestorePath])
-            return .failure(.restoreCopyFailed)
-        }
-
-        guard verifyMirror(source: record.backupPath, mirror: tempRestorePath) else {
-            _ = coreBridge.executeCommand(executable: "/bin/rm", arguments: ["-rf", tempRestorePath])
-            return .failure(.restoreVerificationFailed)
-        }
-
-        // Verified restore payload is ready — swap it in.
-        _ = coreBridge.executeCommand(executable: "/bin/rm", arguments: ["-rf", app.bundlePath])
-        guard coreBridge.executeCommand(executable: "/bin/mv", arguments: [tempRestorePath, app.bundlePath]) else {
-            return .failure(.restoreCopyFailed)
-        }
-
-        return .success(())
-    }
-
-    // MARK: - Lifecycle reconciliation
-
-    /// Called after `TweakInjectionManager.refreshTweaks()` re-scans the
-    /// tweak directory. If a tweak that has active `InjectionRecord`s is no
-    /// longer present at all (its `.dylib`/`.plist` were deleted — i.e. apt
-    /// fully removed/purged the package, as opposed to just disabling it),
-    /// every app it was injected into gets automatically restored so no
-    /// dangling dylib reference is left pointing at deleted files.
-    public func reconcileAfterTweakChanges(currentTweaks: [TweakInfo]) {
-        let currentTweakIDs = Set(currentTweaks.map { $0.id })
-        // `.failed` records still carry a valid backup path (see `fail(_:)`
-        // in performInject) and represent apps that may be left in an
-        // inconsistent state — those are exactly the ones auto-restore
-        // should prioritize cleaning up, not skip.
-        let orphaned = recordStore.records.filter { !currentTweakIDs.contains($0.tweakID) }
-        guard !orphaned.isEmpty else { return }
-
-        console.log("\(orphaned.count) injected app(s) reference a tweak that was removed — restoring automatically.")
-        restoreAll(orphaned)
     }
 
     /// Restores a batch of records sequentially in the background.
@@ -341,28 +217,27 @@ public final class AppInjectionManager: ObservableObject {
                 DispatchQueue.main.async {
                     switch result {
                     case .success:
-                        self.console.log("Restored \(record.appDisplayName) (its tweak was disabled or removed).")
+                        self.console.log("Restored \(record.tweakName) from \(record.appDisplayName) (its tweak was disabled or removed).")
                         self.recordStore.remove(id: record.id)
-                        self.deleteBackupDir(forBackupAppPath: record.backupPath)
+                        self.refreshAppAfterChange(bundleID: record.bundleID, displayName: record.appDisplayName)
                     case .failure(let error):
                         self.console.log("Auto-restore failed for \(record.appDisplayName): \(error.localizedDescription)")
                         if case .appNotFound = error {
                             // The app itself is gone — nothing left to
-                            // restore or track; drop the dead record and
-                            // reclaim its backup instead of keeping a
-                            // permanent entry for an uninstalled app.
+                            // restore or track.
                             self.recordStore.remove(id: record.id)
-                            self.deleteBackupDir(forBackupAppPath: record.backupPath)
                         } else if record.status != .failed {
                             // Don't let a stale "Active"/"Needs Reapply"
                             // badge keep claiming the tweak is still wired
                             // up when the automatic restore we just tried
-                            // (because the tweak was disabled/removed)
-                            // actually failed — surface it so the user
-                            // knows to retry manually.
-                            var stale = record
-                            stale.status = .failed
-                            self.recordStore.upsert(stale)
+                            // actually failed — surface it.
+                            if case .rollbackIncomplete = error {
+                                self.markAppRecordsFailed(bundleID: record.bundleID)
+                            } else {
+                                var stale = record
+                                stale.status = .failed
+                                self.recordStore.upsert(stale)
+                            }
                         }
                     }
                 }
@@ -370,18 +245,307 @@ public final class AppInjectionManager: ObservableObject {
         }
     }
 
+    // MARK: - Lifecycle reconciliation
+
+    /// Called after `TweakInjectionManager.refreshTweaks()` re-scans the
+    /// tweak directory. If a tweak that has active `InjectionRecord`s is
+    /// no longer present at all (its `.dylib`/`.plist` were deleted — i.e.
+    /// apt fully removed/purged the package, as opposed to just disabling
+    /// it), every app it was injected into gets automatically restored so
+    /// no dangling dylib reference is left pointing at deleted files.
+    public func reconcileAfterTweakChanges(currentTweaks: [TweakInfo]) {
+        // `currentTweaks` only ever holds apt-sourced tweaks (this is
+        // called from `TweakInjectionManager.refreshTweaks()`, which only
+        // scans the apt TweakInject directory) — checking a record's
+        // tweakID against JUST that list would flag every sideloaded
+        // dylib's record as "orphaned" on every single refresh, since a
+        // "sideload_..." ID can never appear there. Resolve through both
+        // sources instead, same as everywhere else in this class.
+        let currentTweakIDs = Set(currentTweaks.map { $0.id })
+        let orphaned = recordStore.records.filter { record in
+            if currentTweakIDs.contains(record.tweakID) { return false }
+            return resolveTweakInfo(id: record.tweakID) == nil
+        }
+        guard !orphaned.isEmpty else { return }
+
+        console.log("\(orphaned.count) injected app(s) reference a tweak that was removed — restoring automatically.")
+        restoreAll(orphaned)
+    }
+
+    // MARK: - Rebuild core
+
+    /// Rebuilds `bundleID`'s app from its pristine backup plus an exact
+    /// desired set of tweaks: stages everything in a temp copy, verifies
+    /// it, then atomically swaps it into place. The live app is only
+    /// ever touched at the very last step, and that step is itself
+    /// recoverable (see the swap below) — every earlier failure leaves
+    /// the live app completely untouched.
+    private func rebuild(bundleID: String, desiredTweaks: [TweakInfo]) -> Result<AppPristineBackup, InjectionError> {
+        guard let app = InstalledAppScanner.shared.app(withBundleID: bundleID) else {
+            return .failure(.appNotFound)
+        }
+
+        // Both stores are always kept in sync by this class — the only
+        // way to have active records but no matching pristine backup is
+        // a corrupted/tampered state file. Refuse to "fix" that by
+        // silently backing up the live app (which may already be
+        // patched) as if it were pristine; surface it instead.
+        let existingRecords = recordStore.records(forBundleID: bundleID).filter { $0.status != .failed }
+        if backupStore.backup(for: bundleID) == nil, !existingRecords.isEmpty {
+            console.log("WARNING: \(app.displayName) has injection records but no pristine backup on file — flagging as inconsistent instead of risking a bad backup.")
+            markAppRecordsFailed(bundleID: bundleID)
+            return .failure(.recordMissing)
+        }
+
+        let pristine: AppPristineBackup
+        if let existing = backupStore.backup(for: bundleID),
+           existing.appVersionAtBackup == app.version,
+           fm.fileExists(atPath: existing.backupAppPath) {
+            pristine = existing
+        } else {
+            switch takeFreshPristineBackup(app: app) {
+            case .success(let fresh): pristine = fresh
+            case .failure(let error): return .failure(error)
+            }
+        }
+
+        guard let insertDylibPath = BootstrapConfig.bundledToolPath("insert_dylib") else {
+            return .failure(.toolMissing("insert_dylib"))
+        }
+        let ldidPath = BootstrapConfig.bundledToolPath("ldid") ?? RootlessPaths.ldid
+        guard fm.fileExists(atPath: ldidPath) else { return .failure(.toolMissing("ldid")) }
+        for tweak in desiredTweaks {
+            guard fm.fileExists(atPath: tweak.dylibPath) else { return .failure(.dylibNotFound) }
+        }
+
+        let tempPath = app.bundlePath + ".cytroll_rebuild_tmp"
+        _ = coreBridge.executeCommand(executable: "/bin/rm", arguments: ["-rf", tempPath])
+        guard coreBridge.executeCommand(executable: "/bin/cp", arguments: ["-Rp", pristine.backupAppPath, tempPath]) else {
+            _ = coreBridge.executeCommand(executable: "/bin/rm", arguments: ["-rf", tempPath])
+            return .failure(.backupFailed("could not stage a working copy from the pristine backup"))
+        }
+        guard verifyMirror(source: pristine.backupAppPath, mirror: tempPath) else {
+            _ = coreBridge.executeCommand(executable: "/bin/rm", arguments: ["-rf", tempPath])
+            return .failure(.backupVerificationFailed)
+        }
+
+        let tempExecutablePath = tempPath + "/" + (app.executablePath as NSString).lastPathComponent
+        let frameworksDir = tempPath + "/Frameworks"
+        _ = coreBridge.executeCommand(executable: "/bin/mkdir", arguments: ["-p", frameworksDir])
+
+        for tweak in desiredTweaks {
+            let dylibDestPath = frameworksDir + "/" + dylibFileName(for: tweak)
+            guard coreBridge.executeCommand(executable: "/bin/cp", arguments: ["-p", tweak.dylibPath, dylibDestPath]) else {
+                _ = coreBridge.executeCommand(executable: "/bin/rm", arguments: ["-rf", tempPath])
+                return .failure(.dylibCopyFailed)
+            }
+            // Ad-hoc sign the injected dylib too (matches real TrollFools
+            // behavior; best-effort, failure here is never fatal).
+            _ = coreBridge.executeCommand(executable: ldidPath, arguments: ["-S", dylibDestPath])
+
+            let loadCommandString = "@executable_path/Frameworks/\(dylibFileName(for: tweak))"
+            let insertArgs = ["--inplace", "--weak", "--strip-codesig", "--all-yes", "--overwrite", loadCommandString, tempExecutablePath]
+            guard coreBridge.executeCommand(executable: insertDylibPath, arguments: insertArgs) else {
+                _ = coreBridge.executeCommand(executable: "/bin/rm", arguments: ["-rf", tempPath])
+                return .failure(.insertDylibFailed)
+            }
+        }
+
+        let signArgs: [String] = fm.fileExists(atPath: pristine.entitlementsPath)
+            ? ["-S\(pristine.entitlementsPath)", tempExecutablePath]
+            : ["-S", tempExecutablePath]
+        guard coreBridge.executeCommand(executable: ldidPath, arguments: signArgs) else {
+            _ = coreBridge.executeCommand(executable: "/bin/rm", arguments: ["-rf", tempPath])
+            return .failure(.signingFailed)
+        }
+
+        let (verifyOK, _) = coreBridge.executeCommandCapturingOutput(executable: ldidPath, arguments: ["-e", tempExecutablePath])
+        guard verifyOK, fm.fileExists(atPath: tempExecutablePath) else {
+            _ = coreBridge.executeCommand(executable: "/bin/rm", arguments: ["-rf", tempPath])
+            return .failure(.verificationFailed)
+        }
+
+        switch atomicSwap(liveBundlePath: app.bundlePath, stagedBundlePath: tempPath, displayName: app.displayName) {
+        case .failure(let error):
+            return .failure(error)
+        case .success:
+            backupStore.set(pristine)
+            return .success(pristine)
+        }
+    }
+
+    /// Renames the live bundle aside (never deletes it first), moves the
+    /// verified staged copy into place, then cleans up — if the *second*
+    /// move fails, moves the original right back so nothing is lost. Only
+    /// if BOTH the put-back and one retry of it also fail does the app
+    /// end up in a genuinely inconsistent state (`.rollbackIncomplete`);
+    /// `recoverStrayTempDirectories()` sweeps for exactly this on the next
+    /// launch.
+    private func atomicSwap(liveBundlePath: String, stagedBundlePath: String, displayName: String) -> Result<Void, InjectionError> {
+        let oldAsidePath = liveBundlePath + ".cytroll_previous_tmp"
+        _ = coreBridge.executeCommand(executable: "/bin/rm", arguments: ["-rf", oldAsidePath])
+
+        guard coreBridge.executeCommand(executable: "/bin/mv", arguments: [liveBundlePath, oldAsidePath]) else {
+            _ = coreBridge.executeCommand(executable: "/bin/rm", arguments: ["-rf", stagedBundlePath])
+            return .failure(.swapFailed)
+        }
+
+        guard coreBridge.executeCommand(executable: "/bin/mv", arguments: [stagedBundlePath, liveBundlePath]) else {
+            var putBackOK = coreBridge.executeCommand(executable: "/bin/mv", arguments: [oldAsidePath, liveBundlePath])
+            if !putBackOK {
+                _ = coreBridge.executeCommand(executable: "/bin/rm", arguments: ["-rf", liveBundlePath])
+                putBackOK = coreBridge.executeCommand(executable: "/bin/mv", arguments: [oldAsidePath, liveBundlePath])
+            }
+            _ = coreBridge.executeCommand(executable: "/bin/rm", arguments: ["-rf", stagedBundlePath])
+            console.log(putBackOK
+                ? "Rebuild failed but \(displayName) was safely restored to its previous state."
+                : "CRITICAL: rebuild failed AND \(displayName) could not be restored automatically. Check \(oldAsidePath) with a file manager.")
+            return .failure(putBackOK ? .swapFailed : .rollbackIncomplete)
+        }
+
+        _ = coreBridge.executeCommand(executable: "/bin/rm", arguments: ["-rf", oldAsidePath])
+        return .success(())
+    }
+
+    private func takeFreshPristineBackup(app: InstalledAppInfo) -> Result<AppPristineBackup, InjectionError> {
+        let backupDir = RootlessPaths.injectionBackupsDir + "/" + sanitize(app.bundleID)
+        let appBundleName = (app.bundlePath as NSString).lastPathComponent
+        let backupAppPath = backupDir + "/" + appBundleName
+
+        console.log("Backing up \(app.displayName) (pristine baseline)...")
+        _ = coreBridge.executeCommand(executable: "/bin/rm", arguments: ["-rf", backupDir])
+        _ = coreBridge.executeCommand(executable: "/bin/mkdir", arguments: ["-p", backupDir])
+
+        guard coreBridge.executeCommand(executable: "/bin/cp", arguments: ["-Rp", app.bundlePath, backupAppPath]) else {
+            _ = coreBridge.executeCommand(executable: "/bin/rm", arguments: ["-rf", backupDir])
+            return .failure(.backupFailed("cp exited with a non-zero status"))
+        }
+        guard verifyMirror(source: app.bundlePath, mirror: backupAppPath) else {
+            console.log("Backup does not mirror the original app (file count/size mismatch) — deleting partial backup, aborting.")
+            _ = coreBridge.executeCommand(executable: "/bin/rm", arguments: ["-rf", backupDir])
+            return .failure(.backupVerificationFailed)
+        }
+
+        let backupExecutablePath = backupAppPath + "/" + (app.executablePath as NSString).lastPathComponent
+        let entitlementsPath = backupDir + "/entitlements.plist"
+        let ldidPath = BootstrapConfig.bundledToolPath("ldid") ?? RootlessPaths.ldid
+        if fm.fileExists(atPath: ldidPath) {
+            let (ok, xml) = coreBridge.executeCommandCapturingOutput(executable: ldidPath, arguments: ["-e", backupExecutablePath])
+            if ok, xml.contains("<?xml") {
+                try? xml.write(toFile: entitlementsPath, atomically: true, encoding: .utf8)
+            }
+        }
+
+        return .success(AppPristineBackup(
+            bundleID: app.bundleID,
+            backupAppPath: backupAppPath,
+            entitlementsPath: entitlementsPath,
+            appVersionAtBackup: app.version
+        ))
+    }
+
+    // MARK: - Crash / interruption recovery
+
+    /// Sweeps every installed app's container for leftover
+    /// `.cytroll_rebuild_tmp` / `.cytroll_previous_tmp` directories — left
+    /// behind either by a rebuild that was killed mid-flight (app
+    /// force-quit, crash, device reboot during a swap) or by the
+    /// doomsday case in `atomicSwap` where even the automatic put-back
+    /// didn't succeed. Safe to call anytime; a no-op when nothing is
+    /// stray. Runs once at startup and again whenever the Tweaks tab
+    /// appears.
+    public func recoverStrayTempDirectories() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self = self else { return }
+            let root = RootlessPaths.bundleApplicationsRoot
+            guard let containerDirs = try? self.fm.contentsOfDirectory(atPath: root) else { return }
+
+            for containerDir in containerDirs {
+                let containerPath = root + "/" + containerDir
+                guard let entries = try? self.fm.contentsOfDirectory(atPath: containerPath) else { continue }
+
+                for entry in entries where entry.hasSuffix(".cytroll_previous_tmp") {
+                    let strayPath = containerPath + "/" + entry
+                    let realName = String(entry.dropLast(".cytroll_previous_tmp".count))
+                    let realPath = containerPath + "/" + realName
+                    if !self.fm.fileExists(atPath: realPath) {
+                        self.console.log("Recovering \(realName) from a leftover backup after an interrupted operation...")
+                        _ = self.coreBridge.executeCommand(executable: "/bin/mv", arguments: [strayPath, realPath])
+                    } else {
+                        // The real app is already back in place — this
+                        // stray copy is redundant, safe to drop.
+                        _ = self.coreBridge.executeCommand(executable: "/bin/rm", arguments: ["-rf", strayPath])
+                    }
+                }
+
+                for entry in entries where entry.hasSuffix(".cytroll_rebuild_tmp") {
+                    // A staged working copy from a killed rebuild — never
+                    // the live app itself, always safe to discard.
+                    _ = self.coreBridge.executeCommand(executable: "/bin/rm", arguments: ["-rf", containerPath + "/" + entry])
+                }
+            }
+        }
+    }
+
     // MARK: - Helpers
 
-    /// `backupAppPath` is always `<backupDir>/<AppBundleName>.app`; deleting
-    /// its parent removes the whole timestamped backup (app copy +
-    /// entitlements.plist) in one shot. Runs off the calling thread since
-    /// callers here are on the main thread reacting to a completion.
+    /// Best-effort `uicache -p <bundleID>` after a successful inject/
+    /// restore so the icon/registration cache picks up the change without
+    /// requiring a manual respring. Purely a convenience — failure here
+    /// is never treated as an injection failure.
+    private func refreshAppAfterChange(bundleID: String, displayName: String) {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self = self, self.fm.fileExists(atPath: RootlessPaths.uicache) else { return }
+            self.console.log("Refreshing \(displayName)'s registration (uicache)...")
+            _ = self.coreBridge.executeCommand(executable: RootlessPaths.uicache, arguments: ["-p", bundleID])
+        }
+    }
+
+    /// Any OTHER active records for the same app were also just silently
+    /// rebuilt (their dylibs reapplied fresh) as a side effect of this
+    /// rebuild — bring their bookkeeping (version stamp, `.needsReapply`
+    /// -> `.active`) in line with reality instead of leaving them stale
+    /// until the next manual reapply.
+    private func syncSiblingRecords(bundleID: String, excludingTweakID: String, newVersion: String) {
+        for other in recordStore.records(forBundleID: bundleID) where other.tweakID != excludingTweakID && other.status != .failed {
+            var updated = other
+            updated.injectedAppVersion = newVersion
+            updated.status = .active
+            recordStore.upsert(updated)
+        }
+    }
+
+    private func markAppRecordsFailed(bundleID: String) {
+        for record in recordStore.records(forBundleID: bundleID) {
+            var updated = record
+            updated.status = .failed
+            recordStore.upsert(updated)
+        }
+    }
+
+    /// Looks up a tweak by ID across both sources `AppInjectionManager`
+    /// can inject: apt-installed tweaks (`TweakInjectionManager`) and
+    /// user-picked dylibs (`SideloadedDylibStore`).
+    private func resolveTweakInfo(id: String) -> TweakInfo? {
+        if let apt = TweakInjectionManager.shared.installedTweaks.first(where: { $0.id == id }) {
+            return apt
+        }
+        return SideloadedDylibStore.shared.item(withID: id)?.asTweakInfo
+    }
+
+    /// `backupAppPath` is always `<backupDir>/<AppBundleName>.app`;
+    /// deleting its parent removes the whole backup (app copy +
+    /// entitlements.plist) in one shot.
     private func deleteBackupDir(forBackupAppPath backupAppPath: String) {
         guard !backupAppPath.isEmpty else { return }
         let backupDir = (backupAppPath as NSString).deletingLastPathComponent
         DispatchQueue.global(qos: .utility).async { [weak self] in
             _ = self?.coreBridge.executeCommand(executable: "/bin/rm", arguments: ["-rf", backupDir])
         }
+    }
+
+    private func dylibFileName(for tweak: TweakInfo) -> String {
+        "CytrollTweak_\(sanitize(tweak.id)).dylib"
     }
 
     private func sanitize(_ raw: String) -> String {

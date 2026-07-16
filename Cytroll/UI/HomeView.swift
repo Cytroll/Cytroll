@@ -20,7 +20,7 @@ public struct HomeView: View {
                         } else {
                             smartDashboard
                                 .transition(.slide.combined(with: .opacity))
-                            activityLog
+                            recentActivitySection
                                 .transition(.slide.combined(with: .opacity))
                         }
                     }
@@ -218,23 +218,40 @@ public struct HomeView: View {
     }
     
     // MARK: - Activity Log Subview
-    private var activityLog: some View {
-        VStack(alignment: .leading, spacing: 16) {
+    @StateObject private var activityLogManager = ActivityLogManager.shared
+
+    private var recentActivitySection: some View {
+        let recentEntries = Array(activityLogManager.entries.prefix(5))
+
+        return VStack(alignment: .leading, spacing: 16) {
             Text("ACTIVITY LOG")
                 .font(.caption.bold())
                 .foregroundColor(themeManager.currentTheme.textSecondary)
                 .tracking(1.5)
-            
-            VStack(alignment: .leading, spacing: 12) {
-                ActivityRow(action: "Installed", package: "com.example.tweak", time: "2 mins ago", isSuccess: true)
-                Divider().background(Color.white.opacity(0.1))
-                ActivityRow(action: "Removed", package: "org.coolstar.sileo", time: "1 hr ago", isSuccess: true)
-                Divider().background(Color.white.opacity(0.1))
-                ActivityRow(action: "Upgraded", package: "apt", time: "Yesterday", isSuccess: true)
+
+            if recentEntries.isEmpty {
+                Text("No package actions yet. Installs, removes, and upgrades will show up here.")
+                    .font(.caption)
+                    .foregroundColor(themeManager.currentTheme.textSecondary)
+            } else {
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(Array(recentEntries.enumerated()), id: \.element.id) { index, entry in
+                        ActivityRow(action: entry.action, package: entry.packageName, time: relativeTime(entry.timestamp), isSuccess: entry.success)
+                        if index < recentEntries.count - 1 {
+                            Divider().background(Color.white.opacity(0.1))
+                        }
+                    }
+                }
             }
         }
         .padding(20)
         .glassCard(theme: themeManager.currentTheme)
+    }
+
+    private func relativeTime(_ date: Date) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter.localizedString(for: date, relativeTo: Date())
     }
 }
 
