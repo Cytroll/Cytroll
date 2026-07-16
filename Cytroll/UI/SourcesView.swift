@@ -65,7 +65,7 @@ public struct SourcesView: View {
                     }
                 }
                 .listStyle(.insetGrouped)
-                .scrollContentBackground(.hidden)
+                .cytrollHideScrollBackground()
                 .refreshable {
                     await withCheckedContinuation { continuation in
                         repoManager.refreshAll {

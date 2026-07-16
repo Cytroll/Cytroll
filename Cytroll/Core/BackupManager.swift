@@ -3,7 +3,9 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 // MARK: - Data Model
-public struct CytrollBackup: Codable {
+/// Opt out of the project's default MainActor isolation so FileDocument's
+/// nonisolated encode/decode paths can use this type under Xcode 26 / Swift 6.
+public nonisolated struct CytrollBackup: Codable, Sendable {
     public let version: String
     public let packageIDs: [String]
     public let date: Date

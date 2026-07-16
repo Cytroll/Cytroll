@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 public enum InjectionError: Error, LocalizedError {
     case appNotFound

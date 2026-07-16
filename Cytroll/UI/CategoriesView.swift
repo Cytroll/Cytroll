@@ -56,7 +56,7 @@ public struct CategoriesView: View {
                     }
                 }
                 .listStyle(.insetGrouped)
-                .scrollContentBackground(.hidden)
+                .cytrollHideScrollBackground()
             }
         }
         .navigationTitle("Categories")
@@ -94,7 +94,7 @@ private struct CategoryPackagesView: View {
                 }
             }
             .listStyle(.insetGrouped)
-            .scrollContentBackground(.hidden)
+            .cytrollHideScrollBackground()
         }
         .navigationTitle(categoryName)
     }

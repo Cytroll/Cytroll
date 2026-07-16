@@ -34,7 +34,7 @@ public struct PackagesTabView: View {
                     }
                 }
                 .listStyle(.insetGrouped)
-                .scrollContentBackground(.hidden)
+                .cytrollHideScrollBackground()
                 .refreshable {
                     await withCheckedContinuation { continuation in
                         viewModel.refresh { continuation.resume() }

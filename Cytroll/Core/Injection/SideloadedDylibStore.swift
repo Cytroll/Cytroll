@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 /// A tweak dylib the user picked directly (e.g. via Files), not installed
 /// through apt/TweakInject. Cytroll copies it into its own managed

@@ -28,66 +28,55 @@ public final class CytrollCoreBridge {
         }
     }
 
-    /// Executes a command via cytrollhelper (TrollStore root proxy).
-    @discardableResult
-    public func executeCommand(executable: String, arguments: [String]) -> Bool {
-        console.log("Executing: \(executable) \(arguments.joined(separator: " "))")
-
-        let process = Process()
+    private func resolveLaunch(
+        executable: String,
+        arguments: [String]
+    ) -> (path: String, args: [String]) {
         let helperPath = RootlessPaths.rootHelperPath
         let fm = FileManager.default
 
         if fm.fileExists(atPath: helperPath) {
             ensureHelperExecutable(at: helperPath, fm: fm)
-            process.executableURL = URL(fileURLWithPath: helperPath)
-            process.arguments = [executable] + arguments
-        } else {
-            console.log("WARNING: cytrollhelper not found — direct execution fallback.")
-            process.executableURL = URL(fileURLWithPath: executable)
-            process.arguments = arguments
+            return (helperPath, [executable] + arguments)
         }
 
-        process.environment = RootlessEnvironment.make()
+        console.log("WARNING: cytrollhelper not found — direct execution fallback.")
+        return (executable, arguments)
+    }
 
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-        process.standardOutput = outputPipe
-        process.standardError = errorPipe
+    private func logLines(_ data: Data, prefix: String = "") {
+        guard let str = String(data: data, encoding: .utf8), !str.isEmpty else { return }
+        str.components(separatedBy: .newlines)
+            .filter { !$0.isEmpty }
+            .forEach { console.log(prefix.isEmpty ? $0 : "\(prefix)\($0)") }
+    }
 
-        outputPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            if data.count > 0, let str = String(data: data, encoding: .utf8) {
-                str.components(separatedBy: .newlines)
-                    .filter { !$0.isEmpty }
-                    .forEach { self?.console.log($0) }
-            }
-        }
+    /// Executes a command via cytrollhelper (TrollStore root proxy).
+    ///
+    /// Uses `posix_spawn` — `Foundation.Process` is macOS-only and will not
+    /// compile against the iOS SDK.
+    @discardableResult
+    public func executeCommand(executable: String, arguments: [String]) -> Bool {
+        console.log("Executing: \(executable) \(arguments.joined(separator: " "))")
 
-        errorPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            if data.count > 0, let str = String(data: data, encoding: .utf8) {
-                str.components(separatedBy: .newlines)
-                    .filter { !$0.isEmpty }
-                    .forEach { self?.console.log("ERROR: \($0)") }
-            }
-        }
-
+        let launch = resolveLaunch(executable: executable, arguments: arguments)
         do {
-            try process.run()
-            process.waitUntilExit()
+            let result = try POSIXProcessRunner.run(
+                executable: launch.path,
+                arguments: launch.args,
+                environment: RootlessEnvironment.make()
+            )
+            logLines(result.stdout)
+            logLines(result.stderr, prefix: "ERROR: ")
+            if result.exitStatus != 0 {
+                console.log("Process exited with status code: \(result.exitStatus)")
+                return false
+            }
+            return true
         } catch {
             console.log("EXCEPTION: Failed to launch \(executable): \(error.localizedDescription)")
             return false
         }
-
-        outputPipe.fileHandleForReading.readabilityHandler = nil
-        errorPipe.fileHandleForReading.readabilityHandler = nil
-
-        let success = process.terminationStatus == 0
-        if !success {
-            console.log("Process exited with status code: \(process.terminationStatus)")
-        }
-        return success
     }
 
     /// Like `executeCommand`, but also returns captured stdout as a string.
@@ -96,50 +85,24 @@ public final class CytrollCoreBridge {
     public func executeCommandCapturingOutput(executable: String, arguments: [String]) -> (success: Bool, output: String) {
         console.log("Executing (capture): \(executable) \(arguments.joined(separator: " "))")
 
-        let process = Process()
-        let helperPath = RootlessPaths.rootHelperPath
-        let fm = FileManager.default
-
-        if fm.fileExists(atPath: helperPath) {
-            ensureHelperExecutable(at: helperPath, fm: fm)
-            process.executableURL = URL(fileURLWithPath: helperPath)
-            process.arguments = [executable] + arguments
-        } else {
-            console.log("WARNING: cytrollhelper not found — direct execution fallback.")
-            process.executableURL = URL(fileURLWithPath: executable)
-            process.arguments = arguments
-        }
-
-        process.environment = RootlessEnvironment.make()
-
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-        process.standardOutput = outputPipe
-        process.standardError = errorPipe
-
+        let launch = resolveLaunch(executable: executable, arguments: arguments)
         do {
-            try process.run()
+            let result = try POSIXProcessRunner.run(
+                executable: launch.path,
+                arguments: launch.args,
+                environment: RootlessEnvironment.make()
+            )
+            logLines(result.stderr, prefix: "ERROR: ")
+            let output = String(data: result.stdout, encoding: .utf8) ?? ""
+            if result.exitStatus != 0 {
+                console.log("Process exited with status code: \(result.exitStatus)")
+                return (false, output)
+            }
+            return (true, output)
         } catch {
             console.log("EXCEPTION: Failed to launch \(executable): \(error.localizedDescription)")
             return (false, "")
         }
-
-        let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-        let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-
-        if let errStr = String(data: errorData, encoding: .utf8), !errStr.isEmpty {
-            errStr.components(separatedBy: .newlines)
-                .filter { !$0.isEmpty }
-                .forEach { console.log("ERROR: \($0)") }
-        }
-
-        let success = process.terminationStatus == 0
-        let output = String(data: outputData, encoding: .utf8) ?? ""
-        if !success {
-            console.log("Process exited with status code: \(process.terminationStatus)")
-        }
-        return (success, output)
     }
 
     @discardableResult

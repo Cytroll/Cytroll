@@ -76,7 +76,7 @@ public struct InjectionBackupStorageView: View {
                     .listRowBackground(themeManager.currentTheme.cardBackground.opacity(0.6))
                 }
                 .listStyle(.insetGrouped)
-                .scrollContentBackground(.hidden)
+                .cytrollHideScrollBackground()
             }
         }
         .navigationTitle("Backup Storage")

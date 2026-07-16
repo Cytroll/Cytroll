@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 /// A single real package-transaction event, replacing the Home tab's old
 /// hardcoded `com.example.tweak` placeholder rows.

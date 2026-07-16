@@ -73,7 +73,7 @@ public struct ChangesView: View {
                         .listRowBackground(themeManager.currentTheme.cardBackground.opacity(0.6))
                     }
                     .listStyle(.insetGrouped)
-                    .scrollContentBackground(.hidden)
+                    .cytrollHideScrollBackground()
                 }
             }
             .refreshable {

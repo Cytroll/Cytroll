@@ -32,7 +32,7 @@ public struct TweaksManagerView: View {
                 perAppInjectionDisclaimer
             }
             .listStyle(.insetGrouped)
-            .scrollContentBackground(.hidden)
+            .cytrollHideScrollBackground()
         }
         .navigationTitle("Tweak Injector")
         .navigationBarTitleDisplayMode(.inline)
@@ -452,7 +452,7 @@ private struct InjectionTargetPickerSheet: View {
                             .listRowBackground(themeManager.currentTheme.cardBackground.opacity(0.6))
                         }
                         .listStyle(.insetGrouped)
-                        .scrollContentBackground(.hidden)
+                        .cytrollHideScrollBackground()
                         .searchable(text: $searchText, prompt: "Search apps")
 
                         Button(action: { showingConfirmation = true }) {

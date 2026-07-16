@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 public enum InjectionStatus: String, Codable {
     /// Dylib load command present, signature valid, app version unchanged

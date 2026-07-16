@@ -203,7 +203,7 @@ public struct SettingsView: View {
                     .listRowBackground(themeManager.currentTheme.cardBackground.opacity(0.6))
                 }
                 .listStyle(.insetGrouped)
-                .scrollContentBackground(.hidden)
+                .cytrollHideScrollBackground()
             }
             .navigationTitle("Settings")
             
