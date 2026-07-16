@@ -115,6 +115,34 @@ static int is_third_party_app_bundle_path(const char *path) {
     return 0;
 }
 
+/*
+ * App Manager uninstall: allow rm -rf of the install UUID directory
+ *   /private/var/containers/Bundle/Application/<UUID>
+ * Exactly one path component after the root (never the root itself).
+ * Deeper .app paths are already covered by is_third_party_app_bundle_path().
+ */
+static int is_third_party_install_container_path(const char *path) {
+    if (!path || contains_path_traversal(path)) return 0;
+
+    for (int i = 0; kBundleApplicationRoots[i]; i++) {
+        const char *root = kBundleApplicationRoots[i];
+        size_t rlen = strlen(root);
+        if (!path_has_prefix(path, root)) continue;
+        if (path[rlen] != '/') continue;
+
+        const char *rest = path + rlen + 1;
+        if (rest[0] == '\0') return 0; /* bare Application/ — forbidden */
+
+        /* Must be a single segment (the UUID), no further '/'. */
+        if (strchr(rest, '/') != NULL) return 0;
+
+        size_t ulen = strlen(rest);
+        if (ulen < 8 || ulen > 64) return 0;
+        return 1;
+    }
+    return 0;
+}
+
 static int is_allowed_executable(const char *path) {
     if (!path || path[0] != '/') return 0;
     if (is_blocked_system_path(path)) return 0;
@@ -159,6 +187,9 @@ static int argument_targets_system(const char *arg) {
      * paths strictly inside a third-party app's .app bundle. See
      * is_third_party_app_bundle_path() for the exact structural rule. */
     if (is_third_party_app_bundle_path(arg)) return 0;
+
+    /* App Manager uninstall of a third-party install UUID container. */
+    if (is_third_party_install_container_path(arg)) return 0;
 
     /* Block /var subtree outside /var/jb */
     if (path_has_prefix(arg, "/var/") && !path_has_prefix(arg, "/var/jb")) return 1;

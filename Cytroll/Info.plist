@@ -32,5 +32,11 @@
 	<false/>
 	<key>UIFileSharingEnabled</key>
 	<true/>
+	<!-- App Manager: detect Filza URL scheme for Open Data. -->
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>filza</string>
+	</array>
 </dict>
 </plist>
+

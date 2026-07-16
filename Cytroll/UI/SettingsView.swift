@@ -135,6 +135,15 @@ public struct SettingsView: View {
                         }
                         .tint(themeManager.currentTheme.accent)
                         
+                        NavigationLink(destination: AppManagerView()) {
+                            HStack {
+                                Image(systemName: "square.grid.2x2.fill")
+                                    .foregroundColor(themeManager.currentTheme.accent)
+                                Text("App Manager")
+                                    .foregroundColor(themeManager.currentTheme.textPrimary)
+                            }
+                        }
+
                         NavigationLink(destination: TweaksManagerView()) {
                             HStack {
                                 Image(systemName: "list.bullet.rectangle.portrait.fill")

@@ -12,6 +12,7 @@ public final class CytrollOperationGate {
         case safeMode
         case dataVault
         case diagnostics
+        case appManager
     }
 
     private let lock = NSLock()

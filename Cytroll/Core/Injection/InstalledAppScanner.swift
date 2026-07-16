@@ -12,6 +12,11 @@ public struct InstalledAppInfo: Identifiable, Hashable {
     /// Absolute path to the main Mach-O executable inside the bundle.
     public let executablePath: String
 
+    /// Parent UUID install container under Bundle/Application.
+    public var installContainerPath: String {
+        (bundlePath as NSString).deletingLastPathComponent
+    }
+
     public static func == (lhs: InstalledAppInfo, rhs: InstalledAppInfo) -> Bool {
         lhs.bundleID == rhs.bundleID
     }

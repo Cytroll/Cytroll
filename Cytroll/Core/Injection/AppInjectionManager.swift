@@ -612,7 +612,7 @@ public final class AppInjectionManager: ObservableObject {
         guard let owner = CytrollOperationGate.shared.currentOwner else { return false }
         if allowCareOwner {
             switch owner {
-            case .autoReinject, .safeMode, .injection:
+            case .autoReinject, .safeMode, .injection, .appManager:
                 return false
             case .packageTransaction, .dataVault, .diagnostics:
                 return true

@@ -210,6 +210,22 @@ public struct HomeView: View {
                 DashboardMetric(title: "Packages", value: "\(packageIndex.installedPackages.count)", icon: "shippingbox.fill", color: themeManager.currentTheme.accent)
             }
             
+            NavigationLink(destination: AppManagerView()) {
+                HStack {
+                    Image(systemName: "square.grid.2x2.fill")
+                        .font(.title3)
+                    Text("App Manager")
+                        .font(.headline)
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.footnote.weight(.bold))
+                }
+                .foregroundColor(themeManager.currentTheme.accent)
+                .padding()
+                .background(themeManager.currentTheme.accent.opacity(0.15))
+                .cornerRadius(12)
+            }
+
             Button(action: {
                 guard !isSystemBusy else { return }
                 ConsoleManager.shared.clear()

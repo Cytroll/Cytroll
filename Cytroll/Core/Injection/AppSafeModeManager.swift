@@ -171,6 +171,11 @@ public final class AppSafeModeManager: ObservableObject {
             DispatchQueue.main.async { self.entries = current }
         }
     }
+
+    /// Drops Safe Mode bookkeeping when the app is uninstalled.
+    public func forget(bundleID: String) {
+        removeEntry(bundleID: bundleID)
+    }
 }
 
 public enum SafeModeError: Error, LocalizedError {

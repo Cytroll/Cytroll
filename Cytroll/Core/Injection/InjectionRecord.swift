@@ -125,6 +125,14 @@ public final class InjectionRecordStore: ObservableObject {
         }
     }
 
+    public func removeAll(forBundleID bundleID: String) {
+        ioQueue.sync {
+            let current = self.records.filter { $0.bundleID != bundleID }
+            self.persist(current)
+            DispatchQueue.main.async { self.records = current }
+        }
+    }
+
     public func records(forTweakID tweakID: String) -> [InjectionRecord] {
         records.filter { $0.tweakID == tweakID }
     }
