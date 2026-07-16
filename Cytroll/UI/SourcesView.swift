@@ -75,6 +75,11 @@ public struct SourcesView: View {
                 }
             }
             .navigationTitle("Sources")
+            .onAppear {
+                // Merge any missing essentials (Procursus / ElleKit / Havoc /
+                // Chariz) without touching sources the user already has.
+                repoManager.ensureEssentialSources()
+            }
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button(action: { showingAddSource = true }) {
@@ -82,20 +87,23 @@ public struct SourcesView: View {
                             .font(.title3)
                             .foregroundColor(themeManager.currentTheme.accent)
                     }
+                    .disabled(repoManager.isRefreshing)
                 }
             }
             .alert("Add Source", isPresented: $showingAddSource) {
                 TextField("URL", text: $newSourceURL)
                     .keyboardType(.URL)
                 Button("Add", action: {
-                    repoManager.addSource(url: newSourceURL)
+                    let trimmed = newSourceURL.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard trimmed.count > 10, trimmed.lowercased().hasPrefix("http") else { return }
+                    repoManager.addSource(url: trimmed)
                     newSourceURL = "https://"
                 })
                 Button("Cancel", role: .cancel, action: {
                     newSourceURL = "https://"
                 })
             } message: {
-                Text("Enter the APT repository URL.")
+                Text("Enter the APT repository URL (e.g. https://havoc.app/).")
             }
             .alert("Edit Source", isPresented: Binding(
                 get: { editingSource != nil },

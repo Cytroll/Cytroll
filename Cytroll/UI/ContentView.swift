@@ -63,20 +63,21 @@ public struct ContentView: View {
             Spacer()
             
             Button(action: {
-                // Show native full screen cover
+                guard !queueManager.isProcessing else { return }
                 showingTerminal = true
-                queueManager.confirmAndExecute { success in
+                queueManager.confirmAndExecute { _ in
                     // Terminal stays open so user can read logs.
                 }
             }) {
-                Text("Confirm")
+                Text(queueManager.isProcessing ? "Running…" : "Confirm")
                     .font(.system(size: 12, weight: .bold))
                     .foregroundColor(.white)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 8)
-                    .background(themeManager.currentTheme.accent)
+                    .background(themeManager.currentTheme.accent.opacity(queueManager.isProcessing ? 0.5 : 1))
                     .cornerRadius(8)
             }
+            .disabled(queueManager.isProcessing)
         }
         .padding()
         .glassCard(theme: themeManager.currentTheme)

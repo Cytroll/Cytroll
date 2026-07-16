@@ -229,35 +229,18 @@ public final class BootstrapManager: NSObject, ObservableObject {
         }
     }
 
-    /// Writes default Procursus APT sources so user can add packages immediately.
+    /// Seeds / merges essential APT sources (Procursus, ElleKit, Havoc,
+    /// Chariz). Idempotent — never wipes an existing `cytroll.list`; only
+    /// appends hosts that are still missing.
     private func seedDefaultSources(version: BootstrapVersion) {
-        let fm = FileManager.default
-        let sourcesDir = RootlessPaths.sourcesListDir
-        let targetFile = RootlessPaths.cytrollSourcesFile
-
-        if !fm.fileExists(atPath: sourcesDir) {
-            try? fm.createDirectory(atPath: sourcesDir, withIntermediateDirectories: true)
+        console.log("Ensuring essential APT sources (suite \(version.aptSuite))...")
+        let semaphore = DispatchSemaphore(value: 0)
+        RepositoryManager.shared.ensureEssentialSources {
+            semaphore.signal()
         }
-
-        if fm.fileExists(atPath: targetFile) {
-            console.log("Sources file already exists — skipping default seed.")
-            return
-        }
-
-        let lines = BootstrapConfig.defaultSources(for: version)
-            .map { $0.replacingOccurrences(of: "{SUITE}", with: version.aptSuite) }
-        let content = lines.joined(separator: "\n") + "\n"
-
-        do {
-            try content.write(toFile: targetFile, atomically: true, encoding: .utf8)
-            console.log("Seeded default Procursus sources (\(version.aptSuite)).")
-            _ = coreBridge.executeCommand(
-                executable: RootlessPaths.aptGet,
-                arguments: ["update", "--allow-insecure-repositories"]
-            )
-        } catch {
-            console.log("Failed to seed default sources: \(error.localizedDescription)")
-        }
+        // Bootstrap runs on a background queue; wait so apt update finishes
+        // before we mark install complete.
+        _ = semaphore.wait(timeout: .now() + 180)
     }
 
     private func failBootstrap(reason: String) {

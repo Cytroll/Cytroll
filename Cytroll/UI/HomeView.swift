@@ -214,7 +214,12 @@ public struct HomeView: View {
         }
         .padding(20)
         .glassCard(theme: themeManager.currentTheme)
-        .onAppear { packageIndex.ensureLoaded() }
+        .onAppear {
+            packageIndex.ensureLoaded()
+            // Keep essential repos present even if the user installed an
+            // older Cytroll build that only seeded Procursus (+ ElleKit).
+            RepositoryManager.shared.ensureEssentialSources()
+        }
     }
     
     // MARK: - Activity Log Subview

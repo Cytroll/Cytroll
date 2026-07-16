@@ -21,6 +21,9 @@ public struct SettingsView: View {
     
     // Live Diagnostics Console State
     @State private var showingDiagnosticsConsole = false
+    @State private var settingsAlertTitle = ""
+    @State private var settingsAlertMessage = ""
+    @State private var showingSettingsAlert = false
     
     public init() {}
     
@@ -215,10 +218,10 @@ public struct SettingsView: View {
                 defaultFilename: "Cytroll_Tweaks_Backup"
             ) { result in
                 switch result {
-                case .success(let url):
-                    print("Backup saved to: \(url)")
+                case .success:
+                    presentSettingsAlert(title: "Backup Saved", message: "Your tweaks list was exported successfully.")
                 case .failure(let error):
-                    print("Failed to save backup: \(error.localizedDescription)")
+                    presentSettingsAlert(title: "Backup Failed", message: error.localizedDescription)
                 }
             }
             
@@ -231,19 +234,27 @@ public struct SettingsView: View {
                 switch result {
                 case .success(let urls):
                     guard let url = urls.first else { return }
-                    if url.startAccessingSecurityScopedResource() {
-                        defer { url.stopAccessingSecurityScopedResource() }
-                        do {
-                            let data = try Data(contentsOf: url)
-                            let backup = try JSONDecoder().decode(CytrollBackup.self, from: data)
-                            BackupManager.shared.restoreFromBackup(backup)
-                        } catch {
-                            print("Failed to decode backup: \(error)")
-                        }
+                    let accessed = url.startAccessingSecurityScopedResource()
+                    defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+                    do {
+                        let data = try Data(contentsOf: url)
+                        let backup = try JSONDecoder().decode(CytrollBackup.self, from: data)
+                        BackupManager.shared.restoreFromBackup(backup)
+                        presentSettingsAlert(
+                            title: "Restore Queued",
+                            message: "\(backup.packageIDs.count) package(s) from the backup were added to the queue. Confirm from the floating bar to install."
+                        )
+                    } catch {
+                        presentSettingsAlert(title: "Restore Failed", message: error.localizedDescription)
                     }
                 case .failure(let error):
-                    print("Failed to import backup: \(error.localizedDescription)")
+                    presentSettingsAlert(title: "Import Failed", message: error.localizedDescription)
                 }
+            }
+            .alert(settingsAlertTitle, isPresented: $showingSettingsAlert) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(settingsAlertMessage)
             }
             
             // Removal Alert
@@ -271,5 +282,11 @@ public struct SettingsView: View {
                 )
             }
         }
+    }
+
+    private func presentSettingsAlert(title: String, message: String) {
+        settingsAlertTitle = title
+        settingsAlertMessage = message
+        showingSettingsAlert = true
     }
 }

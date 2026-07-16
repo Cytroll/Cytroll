@@ -1,17 +1,23 @@
 # Cytroll default APT sources (Procursus rootless)
 # {SUITE} is replaced at install time with the Procursus suite number
 # (1800 for iOS 15, 1900 for iOS 16+) — matches BootstrapVersion.aptSuite.
-# Verified format against https://apt.procurs.us/dists/{SUITE}/main/ (2026-07).
+#
+# Website vs APT URL notes:
+#   Procursus site: https://procursus.com  → APT: https://apt.procurs.us/
+#   Chariz site:    https://chariz.com     → APT: https://repo.chariz.com/
+#   Havoc:          https://havoc.app/
+#   ElleKit:        https://ellekit.space/
 
+# Procursus — core Unix tools / libraries every rootless package depends on.
 deb https://apt.procurs.us/ {SUITE} main
 
 # ElleKit — tweak injection library/loader (provides mobilesubstrate).
-# Procursus deliberately excludes hooking platforms/injection libraries
-# from its own repo (removed ElleKit packaging upstream in 2024) to stay
-# jailbreak-agnostic, so it must be seeded from its own official repo.
-# Flat repo (no dists/ hierarchy) — verified against https://ellekit.space/Packages (2026-07).
+# Procursus deliberately excludes hooking platforms from its own repo.
+# Flat repo (no dists/ hierarchy).
 deb https://ellekit.space/ ./
 
-# Popular community repositories (optional — uncomment after bootstrap)
-# deb https://repo.chariz.com/ ./
-# deb https://havoc.app/ ./
+# Havoc — large modern tweak/theme marketplace (free + paid).
+deb https://havoc.app/ ./
+
+# Chariz — trusted official marketplace with rootless-ready tweaks.
+deb https://repo.chariz.com/ ./

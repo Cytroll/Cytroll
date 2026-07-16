@@ -85,14 +85,54 @@ public enum BootstrapConfig {
             .filter { !$0.isEmpty && !$0.hasPrefix("#") }
     }
 
+    /// Canonical rootless sources Cytroll always wants present. Host is used
+    /// for idempotent merge (`RepositoryManager.ensureEssentialSources`) so
+    /// we don't double-add if the user already has the same repo under a
+    /// slightly different URL spelling.
+    public struct EssentialSource: Sendable {
+        public let displayName: String
+        public let host: String
+        public let websiteURL: String
+        /// `{SUITE}` is substituted with `BootstrapVersion.aptSuite`.
+        public let debLineTemplate: String
+    }
+
+    public static let essentialSources: [EssentialSource] = [
+        EssentialSource(
+            displayName: "Procursus",
+            host: "apt.procurs.us",
+            websiteURL: "https://procursus.com",
+            debLineTemplate: "deb https://apt.procurs.us/ {SUITE} main"
+        ),
+        EssentialSource(
+            displayName: "ElleKit",
+            host: "ellekit.space",
+            websiteURL: "https://ellekit.space",
+            debLineTemplate: "deb https://ellekit.space/ ./"
+        ),
+        EssentialSource(
+            displayName: "Havoc",
+            host: "havoc.app",
+            websiteURL: "https://havoc.app",
+            debLineTemplate: "deb https://havoc.app/ ./"
+        ),
+        EssentialSource(
+            displayName: "Chariz",
+            host: "repo.chariz.com",
+            websiteURL: "https://chariz.com",
+            debLineTemplate: "deb https://repo.chariz.com/ ./"
+        ),
+    ]
+
     public static func fallbackSources(for version: BootstrapVersion) -> [String] {
-        [
-            "deb https://apt.procurs.us/ \(version.aptSuite) main",
-            // Procursus excludes injection libraries from its own repo, so
-            // ElleKit (tweak injection/mobilesubstrate provider) needs its
-            // own official source even in the hardcoded fallback list.
-            "deb https://ellekit.space/ ./"
-        ]
+        essentialSources.map {
+            $0.debLineTemplate.replacingOccurrences(of: "{SUITE}", with: version.aptSuite)
+        }
+    }
+
+    public static func friendlySourceName(forHost host: String) -> String? {
+        let key = host.lowercased()
+        return essentialSources.first(where: { $0.host == key })?.displayName
     }
 
     public static func bundledBootstrapURL(for version: BootstrapVersion) -> URL? {

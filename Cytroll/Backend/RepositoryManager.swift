@@ -90,12 +90,101 @@ public final class RepositoryManager: ObservableObject {
             let finalSources = uniqueByURL.values.map { source -> Source in
                 let host = URL(string: source.url)?.host ?? source.name
                 let count = countsByHost[host] ?? 0
-                return Source(name: source.name, url: source.url, iconURL: source.iconURL, packageCount: count)
+                let name = BootstrapConfig.friendlySourceName(forHost: host) ?? source.name
+                return Source(name: name, url: source.url, iconURL: source.iconURL, packageCount: count)
             }.sorted { $0.name.lowercased() < $1.name.lowercased() }
 
             DispatchQueue.main.async {
                 self.sources = finalSources
             }
+    }
+
+    /// Ensures Procursus / ElleKit / Havoc / Chariz are present in
+    /// `cytroll.list`. Idempotent: matches by host so an existing entry
+    /// (any suite / trailing-slash variant) counts. Safe to call on every
+    /// Sources-tab appear and after bootstrap — only runs `apt-get update`
+    /// when something was actually added.
+    public func ensureEssentialSources(completion: (() -> Void)? = nil) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { completion?(); return }
+            let added = self.ensureEssentialSourcesSync()
+            if added {
+                ConsoleManager.shared.log("Added missing essential sources. Updating APT...")
+                _ = self.coreBridge.executeAptGet(arguments: ["update", "--allow-insecure-repositories"])
+                PackageIndexStore.shared.refresh {
+                    self.loadSourcesSync()
+                    DispatchQueue.main.async { completion?() }
+                }
+            } else {
+                // Still refresh the in-memory list so friendly names show up.
+                self.loadSourcesSync()
+                DispatchQueue.main.async { completion?() }
+            }
+        }
+    }
+
+    /// Returns `true` if at least one essential source line was appended.
+    @discardableResult
+    private func ensureEssentialSourcesSync() -> Bool {
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: sourcesDir) {
+            try? fm.createDirectory(atPath: sourcesDir, withIntermediateDirectories: true)
+        }
+
+        let presentHosts = currentSourceHosts()
+        let version = BootstrapVersion.forCurrentOS()
+        var linesToAppend: [String] = []
+
+        for essential in BootstrapConfig.essentialSources {
+            if presentHosts.contains(essential.host.lowercased()) { continue }
+            let line = essential.debLineTemplate
+                .replacingOccurrences(of: "{SUITE}", with: version.aptSuite)
+            linesToAppend.append(line)
+            ConsoleManager.shared.log("Seeding essential source: \(essential.displayName) (\(essential.host))")
+        }
+
+        guard !linesToAppend.isEmpty else { return false }
+
+        let block = (linesToAppend.joined(separator: "\n") + "\n")
+        if fm.fileExists(atPath: cytrollSourcesFile),
+           let handle = try? FileHandle(forWritingTo: URL(fileURLWithPath: cytrollSourcesFile)) {
+            handle.seekToEndOfFile()
+            if let data = block.data(using: .utf8) { handle.write(data) }
+            handle.closeFile()
+        } else {
+            try? block.write(toFile: cytrollSourcesFile, atomically: true, encoding: .utf8)
+        }
+        return true
+    }
+
+    private func currentSourceHosts() -> Set<String> {
+        var hosts = Set<String>()
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(atPath: sourcesDir) else { return hosts }
+
+        for file in files {
+            let path = "\(sourcesDir)/\(file)"
+            guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
+
+            if file.hasSuffix(".list") {
+                for line in content.components(separatedBy: .newlines) {
+                    let trimmed = line.trimmingCharacters(in: .whitespaces)
+                    guard trimmed.hasPrefix("deb ") || trimmed.hasPrefix("deb-src ") else { continue }
+                    let parts = trimmed.split(separator: " ", omittingEmptySubsequences: true)
+                    guard parts.count >= 2, let host = URL(string: String(parts[1]))?.host else { continue }
+                    hosts.insert(host.lowercased())
+                }
+            } else if file.hasSuffix(".sources") {
+                for block in content.components(separatedBy: "\n\n") {
+                    guard let uriLine = block.components(separatedBy: .newlines).first(where: { $0.hasPrefix("URIs: ") }) else { continue }
+                    let url = String(uriLine.dropFirst(6)).trimmingCharacters(in: .whitespaces)
+                    if let host = URL(string: url)?.host {
+                        hosts.insert(host.lowercased())
+                    }
+                }
+            }
+        }
+        return hosts
     }
 
     /// Runs a real `apt-get update` through the root helper, then reloads
@@ -126,9 +215,20 @@ public final class RepositoryManager: ObservableObject {
     
     public func addSource(url: String) {
         var cleanURL = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleanURL.count > 10,
+              let parsed = URL(string: cleanURL),
+              parsed.scheme == "http" || parsed.scheme == "https",
+              parsed.host != nil else {
+            ConsoleManager.shared.log("Rejected invalid source URL: \(url)")
+            return
+        }
         if !cleanURL.hasSuffix("/") { cleanURL += "/" }
-        
-        if sources.contains(where: { $0.url == cleanURL }) {
+
+        let host = parsed.host!.lowercased()
+        if sources.contains(where: {
+            normalize($0.url) == normalize(cleanURL)
+                || (URL(string: $0.url)?.host?.lowercased() == host)
+        }) {
             ConsoleManager.shared.log("Source \(cleanURL) already exists.")
             return
         }
