@@ -21,6 +21,9 @@ public struct SettingsView: View {
     @State private var showingExporter = false
     @State private var showingImporter = false
     @State private var backupDocument: BackupDocument?
+    @State private var showingSourcesExporter = false
+    @State private var showingSourcesImporter = false
+    @State private var sourcesBackupDocument: AptSourcesBackupDocument?
     
     // Live Diagnostics Console State
     @State private var showingDiagnosticsConsole = false
@@ -58,6 +61,36 @@ public struct SettingsView: View {
                                 Text("Restore Tweaks List")
                             }
                         }
+
+                        Button(action: {
+                            AptSourcesBackupManager.shared.createBackup { document in
+                                if document.backup.files.isEmpty {
+                                    presentSettingsAlert(
+                                        title: "Nothing to Backup",
+                                        message: "No APT source files were found under \(RootlessPaths.sourcesListDir)."
+                                    )
+                                    return
+                                }
+                                sourcesBackupDocument = document
+                                showingSourcesExporter = true
+                            }
+                        }) {
+                            HStack {
+                                Image(systemName: "externaldrive.fill.badge.plus")
+                                Text("Backup APT Sources")
+                            }
+                        }
+                        .disabled(isSystemBusy)
+
+                        Button(action: {
+                            showingSourcesImporter = true
+                        }) {
+                            HStack {
+                                Image(systemName: "externaldrive.fill.badge.timemachine")
+                                Text("Restore APT Sources")
+                            }
+                        }
+                        .disabled(isSystemBusy)
                     }
                     .listRowBackground(themeManager.currentTheme.cardBackground.opacity(0.6))
                     .foregroundColor(themeManager.currentTheme.accent)
@@ -291,6 +324,71 @@ public struct SettingsView: View {
                                         message += " \(summary.skippedMissingSource) skipped (missing from sources)."
                                     }
                                     presentSettingsAlert(title: "Restore Queued", message: message)
+                                }
+                            }
+                        }
+                    } catch {
+                        presentSettingsAlert(title: "Restore Failed", message: error.localizedDescription)
+                    }
+                case .failure(let error):
+                    presentSettingsAlert(title: "Import Failed", message: error.localizedDescription)
+                }
+            }
+            .fileExporter(
+                isPresented: $showingSourcesExporter,
+                document: sourcesBackupDocument,
+                contentType: .json,
+                defaultFilename: "Cytroll_APT_Sources_Backup"
+            ) { result in
+                switch result {
+                case .success:
+                    let count = sourcesBackupDocument?.backup.files.count ?? 0
+                    presentSettingsAlert(
+                        title: "Sources Backup Saved",
+                        message: "Exported \(count) APT source file(s)."
+                    )
+                case .failure(let error):
+                    presentSettingsAlert(title: "Backup Failed", message: error.localizedDescription)
+                }
+            }
+            .fileImporter(
+                isPresented: $showingSourcesImporter,
+                allowedContentTypes: [.json],
+                allowsMultipleSelection: false
+            ) { result in
+                switch result {
+                case .success(let urls):
+                    guard let url = urls.first else { return }
+                    let accessed = url.startAccessingSecurityScopedResource()
+                    defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+                    do {
+                        let data = try Data(contentsOf: url)
+                        let decoder = JSONDecoder()
+                        decoder.dateDecodingStrategy = .iso8601
+                        let backup = try decoder.decode(AptSourcesBackup.self, from: data)
+                        guard backup.kind == AptSourcesBackup.kindIdentifier else {
+                            presentSettingsAlert(
+                                title: "Wrong Backup Type",
+                                message: "This file is not an APT sources backup. Use Backup APT Sources to create one."
+                            )
+                            return
+                        }
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            let summary = AptSourcesBackupManager.shared.restore(backup)
+                            DispatchQueue.main.async {
+                                if summary.writtenFiles == 0 {
+                                    presentSettingsAlert(
+                                        title: "Nothing Restored",
+                                        message: summary.skippedInvalid > 0
+                                            ? "All \(summary.skippedInvalid) entries were invalid or failed to write."
+                                            : "The backup contained no source files."
+                                    )
+                                } else {
+                                    var message = "Wrote \(summary.writtenFiles) source file(s) and ran apt-get update."
+                                    if summary.skippedInvalid > 0 {
+                                        message += " \(summary.skippedInvalid) skipped."
+                                    }
+                                    presentSettingsAlert(title: "Sources Restored", message: message)
                                 }
                             }
                         }

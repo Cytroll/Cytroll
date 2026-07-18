@@ -1,10 +1,15 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 public struct HomeView: View {
     @StateObject private var themeManager = ThemeManager.shared
     // Singleton — ObservedObject (not StateObject) so we always track the shared instance.
     @ObservedObject private var bootstrapManager = BootstrapManager.shared
     @State private var showingBootstrapConsole = false
+    @State private var showingOfflineArchiveImporter = false
+    @State private var offlineImportAlertTitle = ""
+    @State private var offlineImportAlertMessage = ""
+    @State private var showingOfflineImportAlert = false
     
     public init() {}
     
@@ -39,7 +44,52 @@ public struct HomeView: View {
                     title: bootstrapManager.isDownloading ? "Downloading Bootstrap" : "Bootstrap"
                 )
             }
+            .fileImporter(
+                isPresented: $showingOfflineArchiveImporter,
+                allowedContentTypes: Self.offlineBootstrapContentTypes,
+                allowsMultipleSelection: false
+            ) { result in
+                switch result {
+                case .success(let urls):
+                    guard let url = urls.first else { return }
+                    let preserve = bootstrapManager.health == .broken
+                    bootstrapManager.importOfflineArchiveAndBootstrap(
+                        from: url,
+                        preferredVersion: selectedBootstrapVersion,
+                        preserveExisting: preserve
+                    ) { importResult in
+                        switch importResult {
+                        case .success:
+                            showingBootstrapConsole = true
+                        case .failure(let error):
+                            offlineImportAlertTitle = "Offline Import Failed"
+                            offlineImportAlertMessage = error.localizedDescription
+                            showingOfflineImportAlert = true
+                        }
+                    }
+                case .failure(let error):
+                    offlineImportAlertTitle = "Could Not Open File"
+                    offlineImportAlertMessage = error.localizedDescription
+                    showingOfflineImportAlert = true
+                }
+            }
+            .alert(offlineImportAlertTitle, isPresented: $showingOfflineImportAlert) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(offlineImportAlertMessage)
+            }
         }
+    }
+
+    private static var offlineBootstrapContentTypes: [UTType] {
+        var types: [UTType] = [.data, .archive]
+        if let zst = UTType(filenameExtension: "zst") {
+            types.insert(zst, at: 0)
+        }
+        if let tarZst = UTType(filenameExtension: "tar.zst") {
+            types.insert(tarZst, at: 0)
+        }
+        return types
     }
     
     // MARK: - Bootstrap Gatekeeper Subview
@@ -140,40 +190,63 @@ public struct HomeView: View {
 
     @ViewBuilder
     private var bootstrapPrimaryButton: some View {
-        if !hasLocalArchive {
-            VStack(spacing: 8) {
+        VStack(spacing: 10) {
+            if !hasLocalArchive {
+                VStack(spacing: 8) {
+                    bootstrapCTAButton(
+                        title: "Bootstrap",
+                        color: themeManager.currentTheme.accent
+                    ) {
+                        showingBootstrapConsole = true
+                        // No local archive — download from Procursus, then extract
+                        // into /var/jb (full real install, not cache-only).
+                        bootstrapManager.setupBootstrap(version: selectedBootstrapVersion)
+                    }
+                    Text("Downloads from apt.procurs.us, then installs into \(RootlessPaths.prefix)")
+                        .font(.caption2)
+                        .foregroundColor(themeManager.currentTheme.textSecondary)
+                        .multilineTextAlignment(.center)
+                }
+            } else if bootstrapManager.health == .broken {
+                bootstrapCTAButton(
+                    title: "Repair Bootstrap",
+                    color: .orange
+                ) {
+                    showingBootstrapConsole = true
+                    // Prefer local; fall back to download if the archive vanished.
+                    bootstrapManager.repairBootstrap(version: selectedBootstrapVersion)
+                }
+            } else {
                 bootstrapCTAButton(
                     title: "Bootstrap",
                     color: themeManager.currentTheme.accent
                 ) {
                     showingBootstrapConsole = true
-                    // No local archive — download from Procursus, then extract
-                    // into /var/jb (full real install, not cache-only).
+                    // Local first, network fallback — same reliable path as before the split.
                     bootstrapManager.setupBootstrap(version: selectedBootstrapVersion)
                 }
-                Text("Downloads from apt.procurs.us, then installs into \(RootlessPaths.prefix)")
-                    .font(.caption2)
-                    .foregroundColor(themeManager.currentTheme.textSecondary)
-                    .multilineTextAlignment(.center)
             }
-        } else if bootstrapManager.health == .broken {
-            bootstrapCTAButton(
-                title: "Repair Bootstrap",
-                color: .orange
-            ) {
-                showingBootstrapConsole = true
-                // Prefer local; fall back to download if the archive vanished.
-                bootstrapManager.repairBootstrap(version: selectedBootstrapVersion)
+
+            // Offline path: pick a pre-downloaded Procursus archive from Files
+            // without growing the .tipa.
+            Button {
+                showingOfflineArchiveImporter = true
+            } label: {
+                Text(bootstrapManager.health == .broken
+                     ? "Repair from Offline Archive…"
+                     : "Use Offline Archive…")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundColor(themeManager.currentTheme.accent)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
             }
-        } else {
-            bootstrapCTAButton(
-                title: "Bootstrap",
-                color: themeManager.currentTheme.accent
-            ) {
-                showingBootstrapConsole = true
-                // Local first, network fallback — same reliable path as before the split.
-                bootstrapManager.setupBootstrap(version: selectedBootstrapVersion)
-            }
+            .buttonStyle(.plain)
+            .disabled(bootstrapManager.isBusy || CytrollOperationGate.shared.isBusy)
+
+            Text("Choose bootstrap_\(selectedBootstrapVersion.rawValue).tar.zst from Files / AirDrop when the network is weak.")
+                .font(.caption2)
+                .foregroundColor(themeManager.currentTheme.textSecondary)
+                .multilineTextAlignment(.center)
         }
     }
 

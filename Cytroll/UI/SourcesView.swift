@@ -1,8 +1,10 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 public struct SourcesView: View {
     @StateObject private var repoManager = RepositoryManager.shared
     @StateObject private var themeManager = ThemeManager.shared
+    @StateObject private var queueManager = QueueManager.shared
     
     @State private var showingAddSource = false
     @State private var newSourceURL = "https://"
@@ -11,6 +13,16 @@ public struct SourcesView: View {
     @State private var editedURL = ""
     @State private var showingValidationAlert = false
     @State private var validationMessage = ""
+    @State private var showingSourcesExporter = false
+    @State private var showingSourcesImporter = false
+    @State private var sourcesBackupDocument: AptSourcesBackupDocument?
+    @State private var sourcesAlertTitle = ""
+    @State private var sourcesAlertMessage = ""
+    @State private var showingSourcesAlert = false
+
+    private var isSystemBusy: Bool {
+        queueManager.isProcessing || repoManager.isRefreshing || CytrollOperationGate.shared.isBusy
+    }
     
     public init() {}
     
@@ -83,13 +95,110 @@ public struct SourcesView: View {
             }
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(action: { showingAddSource = true }) {
-                        Image(systemName: "plus.circle.fill")
-                            .font(.title3)
-                            .foregroundColor(themeManager.currentTheme.accent)
+                    HStack(spacing: 12) {
+                        Menu {
+                            Button {
+                                AptSourcesBackupManager.shared.createBackup { document in
+                                    if document.backup.files.isEmpty {
+                                        presentSourcesAlert(
+                                            title: "Nothing to Backup",
+                                            message: "No APT source files were found."
+                                        )
+                                        return
+                                    }
+                                    sourcesBackupDocument = document
+                                    showingSourcesExporter = true
+                                }
+                            } label: {
+                                Label("Backup Sources", systemImage: "externaldrive.fill.badge.plus")
+                            }
+                            .disabled(isSystemBusy)
+
+                            Button {
+                                showingSourcesImporter = true
+                            } label: {
+                                Label("Restore Sources", systemImage: "externaldrive.fill.badge.timemachine")
+                            }
+                            .disabled(isSystemBusy)
+                        } label: {
+                            Image(systemName: "ellipsis.circle")
+                                .font(.title3)
+                                .foregroundColor(themeManager.currentTheme.accent)
+                        }
+
+                        Button(action: { showingAddSource = true }) {
+                            Image(systemName: "plus.circle.fill")
+                                .font(.title3)
+                                .foregroundColor(themeManager.currentTheme.accent)
+                        }
+                        .disabled(repoManager.isRefreshing)
                     }
-                    .disabled(repoManager.isRefreshing)
                 }
+            }
+            .fileExporter(
+                isPresented: $showingSourcesExporter,
+                document: sourcesBackupDocument,
+                contentType: .json,
+                defaultFilename: "Cytroll_APT_Sources_Backup"
+            ) { result in
+                switch result {
+                case .success:
+                    let count = sourcesBackupDocument?.backup.files.count ?? 0
+                    presentSourcesAlert(title: "Sources Backup Saved", message: "Exported \(count) APT source file(s).")
+                case .failure(let error):
+                    presentSourcesAlert(title: "Backup Failed", message: error.localizedDescription)
+                }
+            }
+            .fileImporter(
+                isPresented: $showingSourcesImporter,
+                allowedContentTypes: [.json],
+                allowsMultipleSelection: false
+            ) { result in
+                switch result {
+                case .success(let urls):
+                    guard let url = urls.first else { return }
+                    let accessed = url.startAccessingSecurityScopedResource()
+                    defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+                    do {
+                        let data = try Data(contentsOf: url)
+                        let decoder = JSONDecoder()
+                        decoder.dateDecodingStrategy = .iso8601
+                        let backup = try decoder.decode(AptSourcesBackup.self, from: data)
+                        guard backup.kind == AptSourcesBackup.kindIdentifier else {
+                            presentSourcesAlert(
+                                title: "Wrong Backup Type",
+                                message: "This file is not an APT sources backup."
+                            )
+                            return
+                        }
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            let summary = AptSourcesBackupManager.shared.restore(backup)
+                            DispatchQueue.main.async {
+                                if summary.writtenFiles == 0 {
+                                    presentSourcesAlert(
+                                        title: "Nothing Restored",
+                                        message: "No source files were written from this backup."
+                                    )
+                                } else {
+                                    var message = "Wrote \(summary.writtenFiles) source file(s) and ran apt-get update."
+                                    if summary.skippedInvalid > 0 {
+                                        message += " \(summary.skippedInvalid) skipped."
+                                    }
+                                    presentSourcesAlert(title: "Sources Restored", message: message)
+                                }
+                            }
+                        }
+                    } catch {
+                        presentSourcesAlert(title: "Restore Failed", message: error.localizedDescription)
+                    }
+                case .failure(let error):
+                    presentSourcesAlert(title: "Import Failed", message: error.localizedDescription)
+                }
+            }
+            .alert(sourcesAlertTitle, isPresented: $showingSourcesAlert) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(sourcesAlertMessage)
             }
             .alert("Add Source", isPresented: $showingAddSource) {
                 TextField("URL", text: $newSourceURL)
@@ -149,5 +258,11 @@ public struct SourcesView: View {
               scheme == "http" || scheme == "https",
               url.host != nil else { return false }
         return true
+    }
+
+    private func presentSourcesAlert(title: String, message: String) {
+        sourcesAlertTitle = title
+        sourcesAlertMessage = message
+        showingSourcesAlert = true
     }
 }

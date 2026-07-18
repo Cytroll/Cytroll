@@ -3,6 +3,29 @@ import Combine
 import UIKit
 import CryptoKit
 
+public struct OfflineBootstrapImportResult: Sendable {
+    public let version: BootstrapVersion
+    public let byteCount: Int64
+}
+
+public enum OfflineBootstrapImportError: LocalizedError {
+    case invalidType
+    case tooSmall(Int64)
+    case copyFailed(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalidType:
+            return "Pick a Procursus bootstrap archive ending in .tar.zst (e.g. bootstrap_1900.tar.zst)."
+        case .tooSmall(let size):
+            let pretty = ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
+            return "File is too small (\(pretty)). Real bootstrap archives are usually 40–100 MB."
+        case .copyFailed(let reason):
+            return "Could not copy archive into Cytroll cache: \(reason)"
+        }
+    }
+}
+
 public final class BootstrapManager: NSObject, ObservableObject {
     public static let shared = BootstrapManager()
 
@@ -84,6 +107,103 @@ public final class BootstrapManager: NSObject, ObservableObject {
             return cached
         }
         return BootstrapConfig.bundledBootstrapURL(for: version)
+    }
+
+    /// Minimum size for a real Procursus rootless bootstrap (~40–100MB).
+    /// Anything smaller is almost certainly the wrong file.
+    private static let offlineArchiveMinimumBytes: Int64 = 5 * 1024 * 1024
+
+    // MARK: - Offline import (Files / AirDrop)
+
+    /// Copies a user-picked `.tar.zst` into the bootstrap cache for the
+    /// matching suite (or `preferredVersion` when the name is generic).
+    /// Does **not** extract — call `installFromLocalArchive` / repair next.
+    public func importOfflineArchive(
+        from sourceURL: URL,
+        preferredVersion: BootstrapVersion
+    ) throws -> OfflineBootstrapImportResult {
+        let accessed = sourceURL.startAccessingSecurityScopedResource()
+        defer { if accessed { sourceURL.stopAccessingSecurityScopedResource() } }
+
+        let name = sourceURL.lastPathComponent.lowercased()
+        guard name.hasSuffix(".tar.zst") || name.hasSuffix(".zst") else {
+            throw OfflineBootstrapImportError.invalidType
+        }
+
+        let attrs = try FileManager.default.attributesOfItem(atPath: sourceURL.path)
+        let size = (attrs[.size] as? NSNumber)?.int64Value ?? 0
+        guard size >= Self.offlineArchiveMinimumBytes else {
+            throw OfflineBootstrapImportError.tooSmall(size)
+        }
+
+        // Reject obvious non-zstd payloads (magic: 28 B5 2F FD).
+        if let handle = try? FileHandle(forReadingFrom: sourceURL) {
+            defer { try? handle.close() }
+            let magic = try handle.read(upToCount: 4) ?? Data()
+            let zstdMagic = Data([0x28, 0xB5, 0x2F, 0xFD])
+            if magic.count == 4 && magic != zstdMagic {
+                throw OfflineBootstrapImportError.invalidType
+            }
+        }
+
+        let version = Self.detectBootstrapVersion(fromFileName: sourceURL.lastPathComponent)
+            ?? preferredVersion
+        let dest = cachedArchiveURL(for: version)
+        let fm = FileManager.default
+
+        if fm.fileExists(atPath: dest.path) {
+            try fm.removeItem(at: dest)
+        }
+
+        do {
+            try fm.copyItem(at: sourceURL, to: dest)
+        } catch {
+            throw OfflineBootstrapImportError.copyFailed(error.localizedDescription)
+        }
+
+        purgeOtherCachedArchives(keeping: version)
+        console.log("Imported offline archive → \(version.fileName) (\(byteCount(of: dest)))")
+        DispatchQueue.main.async { self.refreshLocalArchiveAvailability() }
+
+        return OfflineBootstrapImportResult(version: version, byteCount: size)
+    }
+
+    /// Import a local archive, then immediately install or repair from cache
+    /// (no network). Intended for weak/offline connectivity.
+    public func importOfflineArchiveAndBootstrap(
+        from sourceURL: URL,
+        preferredVersion: BootstrapVersion,
+        preserveExisting: Bool,
+        completion: ((Result<OfflineBootstrapImportResult, Error>) -> Void)? = nil
+    ) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let result = try self.importOfflineArchive(
+                    from: sourceURL,
+                    preferredVersion: preferredVersion
+                )
+                DispatchQueue.main.async {
+                    completion?(.success(result))
+                    if preserveExisting {
+                        self.repairFromLocalArchive(version: result.version)
+                    } else {
+                        self.installFromLocalArchive(version: result.version)
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.console.log("OFFLINE IMPORT ERROR: \(error.localizedDescription)")
+                    completion?(.failure(error))
+                }
+            }
+        }
+    }
+
+    private static func detectBootstrapVersion(fromFileName name: String) -> BootstrapVersion? {
+        let lower = name.lowercased()
+        if lower.contains("1800") { return .ios15 }
+        if lower.contains("1900") { return .ios16Plus }
+        return nil
     }
 
     // MARK: - Public actions
